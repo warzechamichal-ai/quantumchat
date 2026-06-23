@@ -1,0 +1,277 @@
+package com.quantumchat.feature.contacts
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.*
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import com.quantumchat.core.common.model.Contact
+import com.quantumchat.core.crypto.CryptoManager
+import com.quantumchat.ui.theme.CyberTeal
+import com.quantumchat.ui.theme.ElectricViolet
+import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+import javax.inject.Inject
+
+// MVI State
+data class ContactsUiState(
+    val isLoading: Boolean = false,
+    val contacts: List<Contact> = emptyList(),
+    val error: String? = null,
+    val isScanningQr: Boolean = false,
+    val lastScanResultMessage: String? = null
+)
+
+// MVI Intent
+sealed interface ContactsUiIntent {
+    object LoadContacts : ContactsUiIntent
+    data class AddContact(val name: String) : ContactsUiIntent
+    object StartQrScanner : ContactsUiIntent
+    object StopQrScanner : ContactsUiIntent
+    data class ProcessScannedQR(val qrContent: String) : ContactsUiIntent
+}
+
+// ViewModel
+@HiltViewModel
+class ContactsViewModel @Inject constructor(
+    private val cryptoManager: CryptoManager
+) : ViewModel() {
+    private val _state = MutableStateFlow(ContactsUiState())
+    val state: StateFlow<ContactsUiState> = _state.asStateFlow()
+
+    init {
+        handleIntent(ContactsUiIntent.LoadContacts)
+    }
+
+    fun handleIntent(intent: ContactsUiIntent) {
+        viewModelScope.launch {
+            when (intent) {
+                is ContactsUiIntent.LoadContacts -> {
+                    _state.value = _state.value.copy(isLoading = true)
+                    // Mock contacts list
+                    val mockContacts = listOf(
+                        Contact("1", "Alice (Security Lead)", "QC-PQ-A1B2-C3D4", true),
+                        Contact("2", "Bob (Quantum Cryptographer)", "QC-PQ-E5F6-G7H8", false),
+                        Contact("3", "Charlie (Validator)", "QC-PQ-I9J0-K1L2", true)
+                    )
+                    _state.value = _state.value.copy(isLoading = false, contacts = mockContacts)
+                }
+                is ContactsUiIntent.AddContact -> {
+                    val current = _state.value.contacts
+                    val newContact = Contact(
+                        id = (current.size + 1).toString(),
+                        name = intent.name,
+                        publicKeyFingerprint = "QC-PQ-NEW-" + System.currentTimeMillis().toString().takeLast(4),
+                        isOnline = true
+                    )
+                    _state.value = _state.value.copy(contacts = current + newContact)
+                }
+                is ContactsUiIntent.StartQrScanner -> {
+                    _state.value = _state.value.copy(isScanningQr = true, lastScanResultMessage = null)
+                }
+                is ContactsUiIntent.StopQrScanner -> {
+                    _state.value = _state.value.copy(isScanningQr = false)
+                }
+                is ContactsUiIntent.ProcessScannedQR -> {
+                    val verified = cryptoManager.verifyContactWithQR(intent.qrContent)
+                    if (verified) {
+                        val parts = intent.qrContent.split(":")
+                        val fingerprint = parts.getOrNull(1) ?: "QC-PQ-UNKNOWN"
+                        
+                        val newContact = Contact(
+                            id = (state.value.contacts.size + 1).toString(),
+                            name = "Verified Contact (${fingerprint.take(6)})",
+                            publicKeyFingerprint = fingerprint,
+                            isOnline = true
+                        )
+                        _state.value = _state.value.copy(
+                            contacts = _state.value.contacts + newContact,
+                            isScanningQr = false,
+                            lastScanResultMessage = "Successfully verified and added contact."
+                        )
+                    } else {
+                        _state.value = _state.value.copy(
+                            isScanningQr = false,
+                            lastScanResultMessage = "Verification failed: Invalid signature scheme."
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Screen Composable
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ContactsScreen(
+    onContactClick: (Contact) -> Unit,
+    onNavigateToSettings: () -> Unit,
+    viewModel: ContactsViewModel = hiltViewModel()
+) {
+    val state by viewModel.state.collectAsState()
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = { Text("QuantumChat Secure Contacts", fontWeight = FontWeight.Bold) },
+                    actions = {
+                        IconButton(onClick = { viewModel.handleIntent(ContactsUiIntent.StartQrScanner) }) {
+                            Text("📷", style = MaterialTheme.typography.titleLarge)
+                        }
+                        IconButton(onClick = onNavigateToSettings) {
+                            Text("⚙️", style = MaterialTheme.typography.titleLarge)
+                        }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = MaterialTheme.colorScheme.background,
+                        titleContentColor = MaterialTheme.colorScheme.primary
+                    )
+                )
+            }
+        ) { innerPadding ->
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(MaterialTheme.colorScheme.background)
+                    .padding(innerPadding)
+                    .padding(16.dp)
+            ) {
+                // Header Gradient card
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(100.dp)
+                        .background(
+                            brush = Brush.horizontalGradient(
+                                colors = listOf(CyberTeal, ElectricViolet)
+                            ),
+                            shape = RoundedCornerShape(16.dp)
+                        )
+                        .padding(16.dp),
+                    contentAlignment = Alignment.CenterStart
+                ) {
+                    Column {
+                        Text(
+                            "Post-Quantum Encrypted",
+                            color = MaterialTheme.colorScheme.onPrimary,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            "All communications use hybrid lattice-based keys.",
+                            color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.8f),
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // Scan result feedback banner
+                if (state.lastScanResultMessage != null) {
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 16.dp)
+                    ) {
+                        Text(
+                            text = state.lastScanResultMessage ?: "",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                            modifier = Modifier.padding(12.dp)
+                        )
+                    }
+                }
+
+                if (state.isLoading) {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+                    }
+                } else {
+                    LazyColumn(
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.fillMaxSize()
+                    ) {
+                        items(state.contacts) { contact ->
+                            ContactItem(contact = contact, onClick = { onContactClick(contact) })
+                        }
+                    }
+                }
+            }
+        }
+
+        // Camera QR Code Scanner Overlay
+        if (state.isScanningQr) {
+            CameraPreviewScanner(
+                onQrCodeScanned = { qrContent ->
+                    viewModel.handleIntent(ContactsUiIntent.ProcessScannedQR(qrContent))
+                },
+                onCloseScanner = {
+                    viewModel.handleIntent(ContactsUiIntent.StopQrScanner)
+                },
+                modifier = Modifier.fillMaxSize()
+            )
+        }
+    }
+}
+
+@Composable
+fun ContactItem(contact: Contact, onClick: () -> Unit) {
+    Card(
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface
+        ),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+    ) {
+        Row(
+            modifier = Modifier.padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = contact.name,
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onBackground
+                )
+                Text(
+                    text = "Fingerprint: ${contact.publicKeyFingerprint}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f)
+                )
+            }
+            Box(
+                modifier = Modifier
+                    .size(12.dp)
+                    .background(
+                        color = if (contact.isOnline) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.onBackground.copy(alpha = 0.3f),
+                        shape = RoundedCornerShape(6.dp)
+                    )
+            )
+        }
+    }
+}
