@@ -8,7 +8,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -16,106 +15,10 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
-import androidx.lifecycle.ViewModel
-import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.quantumchat.core.common.model.Contact
-import com.quantumchat.core.crypto.CryptoManager
 import com.quantumchat.ui.theme.CyberTeal
 import com.quantumchat.ui.theme.ElectricViolet
-import dagger.hilt.android.lifecycle.HiltViewModel
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.launch
-import javax.inject.Inject
-
-// MVI State
-data class ContactsUiState(
-    val isLoading: Boolean = false,
-    val contacts: List<Contact> = emptyList(),
-    val error: String? = null,
-    val isScanningQr: Boolean = false,
-    val lastScanResultMessage: String? = null
-)
-
-// MVI Intent
-sealed interface ContactsUiIntent {
-    object LoadContacts : ContactsUiIntent
-    data class AddContact(val name: String) : ContactsUiIntent
-    object StartQrScanner : ContactsUiIntent
-    object StopQrScanner : ContactsUiIntent
-    data class ProcessScannedQR(val qrContent: String) : ContactsUiIntent
-}
-
-// ViewModel
-@HiltViewModel
-class ContactsViewModel @Inject constructor(
-    private val cryptoManager: CryptoManager
-) : ViewModel() {
-    private val _state = MutableStateFlow(ContactsUiState())
-    val state: StateFlow<ContactsUiState> = _state.asStateFlow()
-
-    init {
-        handleIntent(ContactsUiIntent.LoadContacts)
-    }
-
-    fun handleIntent(intent: ContactsUiIntent) {
-        viewModelScope.launch {
-            when (intent) {
-                is ContactsUiIntent.LoadContacts -> {
-                    _state.value = _state.value.copy(isLoading = true)
-                    // Mock contacts list
-                    val mockContacts = listOf(
-                        Contact("1", "Alice (Security Lead)", "QC-PQ-A1B2-C3D4", true),
-                        Contact("2", "Bob (Quantum Cryptographer)", "QC-PQ-E5F6-G7H8", false),
-                        Contact("3", "Charlie (Validator)", "QC-PQ-I9J0-K1L2", true)
-                    )
-                    _state.value = _state.value.copy(isLoading = false, contacts = mockContacts)
-                }
-                is ContactsUiIntent.AddContact -> {
-                    val current = _state.value.contacts
-                    val newContact = Contact(
-                        id = (current.size + 1).toString(),
-                        name = intent.name,
-                        publicKeyFingerprint = "QC-PQ-NEW-" + System.currentTimeMillis().toString().takeLast(4),
-                        isOnline = true
-                    )
-                    _state.value = _state.value.copy(contacts = current + newContact)
-                }
-                is ContactsUiIntent.StartQrScanner -> {
-                    _state.value = _state.value.copy(isScanningQr = true, lastScanResultMessage = null)
-                }
-                is ContactsUiIntent.StopQrScanner -> {
-                    _state.value = _state.value.copy(isScanningQr = false)
-                }
-                is ContactsUiIntent.ProcessScannedQR -> {
-                    val verified = cryptoManager.verifyContactWithQR(intent.qrContent)
-                    if (verified) {
-                        val parts = intent.qrContent.split(":")
-                        val fingerprint = parts.getOrNull(1) ?: "QC-PQ-UNKNOWN"
-                        
-                        val newContact = Contact(
-                            id = (state.value.contacts.size + 1).toString(),
-                            name = "Verified Contact (${fingerprint.take(6)})",
-                            publicKeyFingerprint = fingerprint,
-                            isOnline = true
-                        )
-                        _state.value = _state.value.copy(
-                            contacts = _state.value.contacts + newContact,
-                            isScanningQr = false,
-                            lastScanResultMessage = "Successfully verified and added contact."
-                        )
-                    } else {
-                        _state.value = _state.value.copy(
-                            isScanningQr = false,
-                            lastScanResultMessage = "Verification failed: Invalid signature scheme."
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
 
 // Screen Composable
 @OptIn(ExperimentalMaterial3Api::class)
@@ -125,7 +28,7 @@ fun ContactsScreen(
     onNavigateToSettings: () -> Unit,
     viewModel: ContactsViewModel = hiltViewModel()
 ) {
-    val state by viewModel.state.collectAsState()
+    val state by viewModel.state.collectAsStateWithLifecycle()
 
     Box(modifier = Modifier.fillMaxSize()) {
         Scaffold(
@@ -184,6 +87,25 @@ fun ContactsScreen(
                 }
 
                 Spacer(modifier = Modifier.height(16.dp))
+
+                // Error feedback banner
+                if (state.error != null) {
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 16.dp)
+                    ) {
+                        Text(
+                            text = state.error ?: "",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                            modifier = Modifier.padding(12.dp)
+                        )
+                    }
+                }
 
                 // Scan result feedback banner
                 if (state.lastScanResultMessage != null) {

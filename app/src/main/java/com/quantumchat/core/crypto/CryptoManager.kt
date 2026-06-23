@@ -78,5 +78,16 @@ interface CryptoManager {
      */
     fun verifyContactWithQR(scannedQrContent: String): Boolean
 
+    /**
+     * Wyodrębnia dane kontaktu ze zeskanowanego kodu QR.
+     * Zwraca obiekt Contact, jeśli weryfikacja przebiegła pomyślnie, w przeciwnym razie null.
+     */
+    fun extractContactFromQR(scannedQrContent: String): com.quantumchat.core.common.model.Contact?
+
+    /**
+     * Generuje unikalny fingerprint klucza publicznego dla nowego kontaktu.
+     */
+    fun generateContactFingerprint(): String
+
     // endregion
 }

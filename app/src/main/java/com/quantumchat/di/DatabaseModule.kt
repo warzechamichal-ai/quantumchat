@@ -2,6 +2,10 @@ package com.quantumchat.di
 
 import android.content.Context
 import androidx.room.Room
+import androidx.room.RoomDatabase
+import androidx.sqlite.db.SupportSQLiteDatabase
+import com.quantumchat.core.data.ContactRepository
+import com.quantumchat.core.data.ContactRepositoryImpl
 import com.quantumchat.core.database.ContactDao
 import com.quantumchat.core.database.MessageDao
 import com.quantumchat.core.database.QuantumChatDatabase
@@ -45,6 +49,24 @@ object DatabaseModule {
             QuantumChatDatabase.DATABASE_NAME
         )
         .openHelperFactory(factory)
+        .addCallback(object : RoomDatabase.Callback() {
+            override fun onCreate(db: SupportSQLiteDatabase) {
+                super.onCreate(db)
+                Timber.d("onCreate database callback: Inserting mock contacts...")
+                db.execSQL(
+                    "INSERT INTO contacts (id, name, publicKeyFingerprint, isOnline) " +
+                    "VALUES ('1', 'Alice (Security Lead)', 'QC-PQ-A1B2-C3D4', 1)"
+                )
+                db.execSQL(
+                    "INSERT INTO contacts (id, name, publicKeyFingerprint, isOnline) " +
+                    "VALUES ('2', 'Bob (Quantum Cryptographer)', 'QC-PQ-E5F6-G7H8', 0)"
+                )
+                db.execSQL(
+                    "INSERT INTO contacts (id, name, publicKeyFingerprint, isOnline) " +
+                    "VALUES ('3', 'Charlie (Validator)', 'QC-PQ-I9J0-K1L2', 1)"
+                )
+            }
+        })
         .fallbackToDestructiveMigration(true) // Clean migration for development setups
         .build()
     }
@@ -57,5 +79,11 @@ object DatabaseModule {
     @Provides
     fun provideMessageDao(database: QuantumChatDatabase): MessageDao {
         return database.messageDao()
+    }
+
+    @Provides
+    @Singleton
+    fun provideContactRepository(contactDao: ContactDao): ContactRepository {
+        return ContactRepositoryImpl(contactDao)
     }
 }

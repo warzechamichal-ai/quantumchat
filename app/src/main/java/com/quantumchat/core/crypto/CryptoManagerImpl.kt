@@ -61,4 +61,20 @@ class CryptoManagerImpl @Inject constructor() : CryptoManager {
         Timber.d("Verifying out-of-band contact QR content: $scannedQrContent")
         return scannedQrContent.startsWith("QC-IDENTITY:")
     }
+
+    override fun extractContactFromQR(scannedQrContent: String): com.quantumchat.core.common.model.Contact? {
+        if (!verifyContactWithQR(scannedQrContent)) return null
+        val parts = scannedQrContent.split(":")
+        val fingerprint = parts.getOrNull(1) ?: "QC-PQ-UNKNOWN"
+        return com.quantumchat.core.common.model.Contact(
+            id = System.currentTimeMillis().toString(),
+            name = "Verified Contact (${fingerprint.take(6)})",
+            publicKeyFingerprint = fingerprint,
+            isOnline = true
+        )
+    }
+
+    override fun generateContactFingerprint(): String {
+        return "QC-PQ-NEW-" + System.currentTimeMillis().toString().takeLast(4)
+    }
 }
