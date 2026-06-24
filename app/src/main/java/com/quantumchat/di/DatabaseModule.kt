@@ -9,6 +9,9 @@ import com.quantumchat.core.data.ContactRepositoryImpl
 import com.quantumchat.core.database.ContactDao
 import com.quantumchat.core.database.MessageDao
 import com.quantumchat.core.database.QuantumChatDatabase
+import com.quantumchat.core.database.RatchetStateDao
+import com.quantumchat.core.database.SkippedMessageKeyDao
+import com.quantumchat.core.database.PendingMessageDao
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -49,6 +52,13 @@ object DatabaseModule {
             QuantumChatDatabase.DATABASE_NAME
         )
         .openHelperFactory(factory)
+        .addMigrations(
+            QuantumChatDatabase.MIGRATION_3_4,
+            QuantumChatDatabase.MIGRATION_4_5,
+            QuantumChatDatabase.MIGRATION_5_6,
+            QuantumChatDatabase.MIGRATION_6_7,
+            QuantumChatDatabase.MIGRATION_7_8
+        )
         .addCallback(object : RoomDatabase.Callback() {
             override fun onCreate(db: SupportSQLiteDatabase) {
                 super.onCreate(db)
@@ -67,7 +77,6 @@ object DatabaseModule {
                 )
             }
         })
-        .fallbackToDestructiveMigration(true) // Clean migration for development setups
         .build()
     }
 
@@ -79,6 +88,21 @@ object DatabaseModule {
     @Provides
     fun provideMessageDao(database: QuantumChatDatabase): MessageDao {
         return database.messageDao()
+    }
+
+    @Provides
+    fun provideRatchetStateDao(database: QuantumChatDatabase): RatchetStateDao {
+        return database.ratchetStateDao()
+    }
+
+    @Provides
+    fun provideSkippedMessageKeyDao(database: QuantumChatDatabase): SkippedMessageKeyDao {
+        return database.skippedMessageKeyDao()
+    }
+
+    @Provides
+    fun providePendingMessageDao(database: QuantumChatDatabase): PendingMessageDao {
+        return database.pendingMessageDao()
     }
 
     @Provides

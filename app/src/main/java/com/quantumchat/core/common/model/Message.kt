@@ -13,11 +13,19 @@ import kotlinx.serialization.Serializable
  * @property isEncrypted Indicates if the message was sent/received via end-to-end encryption.
  */
 @Serializable
+enum class MessageStatus {
+    SENT,
+    DELIVERED,
+    READ
+}
+
+@Serializable
 data class Message(
     val id: String,
     val senderId: String,
     val recipientId: String,
     val content: String,
     val timestamp: Long,
-    val isEncrypted: Boolean = true
+    val isEncrypted: Boolean = true,
+    val status: MessageStatus = MessageStatus.SENT
 )

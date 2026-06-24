@@ -4,10 +4,10 @@
     <selectionStates>
       <SelectionState runConfigName="app">
         <option name="selectionMode" value="DROPDOWN" />
-        <DropdownSelection timestamp="2026-06-23T07:58:51.991546900Z">
+        <DropdownSelection timestamp="2026-06-24T13:16:55.767765900Z">
           <Target type="DEFAULT_BOOT">
             <handle>
-              <DeviceId pluginId="LocalEmulator" identifier="path=C:\Users\warze\.android\avd\Alice.avd" />
+              <DeviceId pluginId="LocalEmulator" identifier="path=C:\Users\warze\.android\avd\Bob.avd" />
             </handle>
           </Target>
         </DropdownSelection>
@@ -15,7 +15,7 @@
       </SelectionState>
       <SelectionState runConfigName="androidTest">
         <option name="selectionMode" value="DROPDOWN" />
-        <DropdownSelection timestamp="2026-06-23T07:58:51.991546900Z">
+        <DropdownSelection timestamp="2026-06-23T12:11:08.504239900Z">
           <Target type="DEFAULT_BOOT">
             <handle>
               <DeviceId pluginId="LocalEmulator" identifier="path=C:\Users\warze\.android\avd\Alice.avd" />

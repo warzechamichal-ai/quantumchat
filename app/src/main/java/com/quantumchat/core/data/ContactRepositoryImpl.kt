@@ -28,4 +28,12 @@ class ContactRepositoryImpl @Inject constructor(
     override suspend fun deleteContact(contact: Contact) {
         contactDao.deleteContact(contact.toEntity())
     }
+
+    override suspend fun updateContact(contact: Contact) {
+        contactDao.insertContact(contact.toEntity())
+    }
+
+    override suspend fun getContact(id: String): Contact? {
+        return contactDao.getContactById(id)?.toDomain()
+    }
 }

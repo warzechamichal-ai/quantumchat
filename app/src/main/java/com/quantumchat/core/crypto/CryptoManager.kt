@@ -1,6 +1,15 @@
 package com.quantumchat.core.crypto
 
 /**
+ * Zestaw zweryfikowanych danych kontaktu uzyskany na podstawie kodu QR.
+ */
+data class VerifiedContactData(
+    val name: String,
+    val publicKeyFingerprint: String,
+    val onionAddress: String? = null
+)
+
+/**
  * Centralny interfejs odpowiedzialny za wszystkie operacje kryptograficzne w aplikacji.
  *
  * Filozofia bezpieczeństwa:
@@ -31,6 +40,18 @@ interface CryptoManager {
      * Nawiązuje bezpieczną sesję z kontaktem.
      */
     fun establishSecureSession(contactFingerprint: String): Boolean
+
+    /**
+     * Wykonuje hybrydowe uzgadnianie kluczy (X25519 + ML-KEM).
+     * Łączy klasyczny shared secret z sekretem ML-KEM za pomocą HKDF-SHA256.
+     * Zwraca parę: (wynikowy rootKey, opcjonalny kyberCiphertext do wysłania).
+     */
+    fun performHybridKeyAgreement(
+        x25519SharedSecret: ByteArray,
+        contactFingerprint: String,
+        incomingKyberCiphertext: ByteArray? = null
+    ): Pair<ByteArray, ByteArray?>
+
 
     // endregion
 
@@ -80,14 +101,19 @@ interface CryptoManager {
 
     /**
      * Wyodrębnia dane kontaktu ze zeskanowanego kodu QR.
-     * Zwraca obiekt Contact, jeśli weryfikacja przebiegła pomyślnie, w przeciwnym razie null.
+     * Zwraca dane kontaktu, jeśli weryfikacja przebiegła pomyślnie, w przeciwnym razie null.
      */
-    fun extractContactFromQR(scannedQrContent: String): com.quantumchat.core.common.model.Contact?
+    fun extractContactFromQR(scannedQrContent: String): VerifiedContactData?
 
     /**
      * Generuje unikalny fingerprint klucza publicznego dla nowego kontaktu.
      */
     fun generateContactFingerprint(): String
+
+    /**
+     * Wypisuje i usuwa stan sesji (RatchetState) z pamięci oraz bazy danych.
+     */
+    fun deleteSession(contactFingerprint: String): Boolean
 
     // endregion
 }

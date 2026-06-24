@@ -12,12 +12,16 @@ android {
 
     defaultConfig {
         applicationId = "com.quantumchat"
-        minSdk = 34
-        targetSdk = 37
-        versionCode = 1
-        versionName = "1.0"
+        minSdk = 30
+        targetSdk = 35
+        versionCode = 16
+        versionName = "3.4"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        ndk {
+            abiFilters.addAll(setOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64"))
+        }
     }
 
     buildTypes {
@@ -33,12 +37,15 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 
 kotlin {
     compilerOptions {
         jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+        languageVersion.set(org.jetbrains.kotlin.gradle.dsl.KotlinVersion.KOTLIN_2_1)
+        apiVersion.set(org.jetbrains.kotlin.gradle.dsl.KotlinVersion.KOTLIN_2_1)
     }
 }
 
@@ -73,6 +80,13 @@ dependencies {
     implementation(libs.camerax.view)
     implementation(libs.mlkit.barcode.scanning)
 
+    // Cryptography
+    implementation(libs.bouncycastle.prov)
+    
+    // Networking
+    implementation(libs.okhttp)
+    implementation(libs.netcipher)
+
     // Encrypted Room Local Database
     implementation(libs.room.runtime)
     implementation(libs.room.ktx)
@@ -81,6 +95,8 @@ dependencies {
     implementation(libs.sqlite.ktx)
 
     testImplementation(libs.junit)
+    testImplementation(libs.mockk)
+    testImplementation(libs.kotlinx.coroutines.test)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     androidTestImplementation(libs.androidx.espresso.core)

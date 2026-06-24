@@ -19,12 +19,21 @@ import androidx.lifecycle.viewModelScope
 import com.quantumchat.core.common.model.Contact
 import com.quantumchat.core.common.model.Message
 import com.quantumchat.core.crypto.CryptoManager
-import com.quantumchat.core.networking.Transport
+import com.quantumchat.core.networking.TransportManager
+import com.quantumchat.core.networking.DiscoveredDevice
+import com.quantumchat.core.database.MessageDao
+import com.quantumchat.core.database.toDomain
+import com.quantumchat.core.database.toEntity
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.delay
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.encodeToString
 import javax.inject.Inject
 
 // MVI State
@@ -32,7 +41,9 @@ data class ChatUiState(
     val contact: Contact? = null,
     val messages: List<Message> = emptyList(),
     val connectionActive: Boolean = false,
-    val inputText: String = ""
+    val inputText: String = "",
+    val discoveredDevices: List<DiscoveredDevice> = emptyList(),
+    val isScanningManually: Boolean = false
 )
 
 // MVI Intent
@@ -40,37 +51,64 @@ sealed interface ChatUiIntent {
     data class LoadChat(val contactId: String, val contactName: String) : ChatUiIntent
     data class SendTextMessage(val content: String) : ChatUiIntent
     data class UpdateInputText(val text: String) : ChatUiIntent
-    data class ReceiveMessage(val message: Message) : ChatUiIntent
+    object ForceDiscovery : ChatUiIntent
 }
 
 // ViewModel
 @HiltViewModel
 class ChatViewModel @Inject constructor(
     private val cryptoManager: CryptoManager,
-    private val transport: Transport
+    private val transportManager: TransportManager,
+    private val messageDao: MessageDao
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(ChatUiState())
     val state: StateFlow<ChatUiState> = _state.asStateFlow()
 
     init {
-        // Observe connection state from transport
+
+        // Observe discovered devices in the local network via consolidated flow
         viewModelScope.launch {
-            transport.isConnected.collect { isConnected ->
-                _state.value = _state.value.copy(connectionActive = isConnected)
+            transportManager.discoveredDevices.collect { devicesList ->
+                _state.value = _state.value.copy(discoveredDevices = devicesList)
+                
+                // Automatically connect via LAN/P2P if contact is discovered
+                val contact = _state.value.contact ?: return@collect
+                if (!_state.value.connectionActive) {
+                    val matchingDevice = devicesList.find { it.fingerprint == contact.publicKeyFingerprint }
+                    if (matchingDevice != null) {
+                        timber.log.Timber.i("TransportManager: Found matching active contact in discovery: ${matchingDevice.ipAddress}:${matchingDevice.port}. Connecting P2P...")
+                        val success = transportManager.connect("${matchingDevice.ipAddress}:${matchingDevice.port}")
+                        _state.value = _state.value.copy(connectionActive = success)
+                        if (success) {
+                            timber.log.Timber.i("TransportManager: Connected via P2P. Stopping active discovery to save battery.")
+                            transportManager.stopDiscovery()
+                        }
+                    }
+                }
             }
         }
 
-        // Observe incoming messages
+        // Intelligent Battery Optimization Loop:
+        // Periodically checks connection status and turns discovery ON/OFF dynamically.
         viewModelScope.launch {
-            transport.observeIncomingMessages().collect { message ->
-                handleIntent(ChatUiIntent.ReceiveMessage(message))
-            }
-        }
+            while (isActive) {
+                val fingerprint = _state.value.contact?.publicKeyFingerprint
+                val isCurrentlyConnected = transportManager.isConnected
+                val isOnline = isCurrentlyConnected || (fingerprint != null && transportManager.onlinePeers.first().contains(fingerprint))
+                if (_state.value.connectionActive != isOnline) {
+                    _state.value = _state.value.copy(connectionActive = isOnline)
+                }
 
-        // Auto-connect transport on entering screen
-        viewModelScope.launch {
-            transport.connect().collect { /* Connection loading/success states handled dynamically */ }
+                if (isCurrentlyConnected) {
+                    // Turn discovery OFF if we already have an active secure connection
+                    transportManager.stopDiscovery()
+                } else if (!_state.value.isScanningManually) {
+                    // Turn discovery ON to find local devices only if not already connected
+                    transportManager.startDiscovery()
+                }
+                delay(3000) // Poll every 3 seconds to keep battery usage minimal
+            }
         }
     }
 
@@ -78,16 +116,44 @@ class ChatViewModel @Inject constructor(
         viewModelScope.launch {
             when (intent) {
                 is ChatUiIntent.LoadChat -> {
+                    val fingerprint = "QC-PQ-MOCK-${intent.contactId}"
                     // Establish secure PQ hybrid session for contact
-                    cryptoManager.establishSecureSession("QC-PQ-MOCK-${intent.contactId}")
+                    cryptoManager.establishSecureSession(fingerprint)
                     
-                    val mockContact = Contact(intent.contactId, intent.contactName, "QC-PQ-MOCK-${intent.contactId}", true)
+                    val mockContact = Contact(intent.contactId, intent.contactName, fingerprint, true)
                     _state.value = _state.value.copy(
-                        contact = mockContact,
-                        messages = listOf(
-                            Message("m1", mockContact.id, "me", "Hello! This session is secured with post-quantum lattice keys.", System.currentTimeMillis() - 600000)
-                        )
+                        contact = mockContact
                     )
+
+                    // Observe messages from database reactively
+                    viewModelScope.launch {
+                        messageDao.observeMessagesForContact(mockContact.id).collect { entities ->
+                            _state.value = _state.value.copy(
+                                messages = entities.map { it.toDomain() }
+                            )
+                        }
+                    }
+
+                    // Observe online peers flow reactively
+                    viewModelScope.launch {
+                        transportManager.onlinePeers.collect { onlineSet ->
+                            val isOnline = onlineSet.contains(fingerprint) || transportManager.isConnected
+                            _state.value = _state.value.copy(connectionActive = isOnline)
+                        }
+                    }
+
+                    // First check if already discovered in LAN
+                    val matchingDevice = _state.value.discoveredDevices.find { it.fingerprint == fingerprint }
+                    val targetAddress = if (matchingDevice != null) {
+                        "${matchingDevice.ipAddress}:${matchingDevice.port}"
+                    } else {
+                        fingerprint
+                    }
+
+                    // Connect to transport for this contact (TCP IP or WebSocket fingerprint fallback)
+                    val connected = transportManager.connect(targetAddress)
+                    val isOnline = connected || transportManager.onlinePeers.first().contains(fingerprint)
+                    _state.value = _state.value.copy(connectionActive = isOnline)
                 }
                 is ChatUiIntent.SendTextMessage -> {
                     val text = intent.content.trim()
@@ -95,46 +161,59 @@ class ChatViewModel @Inject constructor(
 
                     val targetContact = _state.value.contact ?: return@launch
 
-                    // 1. Encrypt message content via CryptoManager
-                    val plainBytes = text.toByteArray(Charsets.UTF_8)
-                    val cipherBytes = cryptoManager.encryptMessage(plainBytes, targetContact.id)
-                    val encryptedPayload = cipherBytes.toString(Charsets.UTF_8)
-
-                    // 2. Build secure Message entity
-                    val message = Message(
+                    // 1. Build secure Message entity
+                    val displayMessage = Message(
                         id = System.currentTimeMillis().toString(),
                         senderId = "me",
                         recipientId = targetContact.id,
-                        content = encryptedPayload,
+                        content = text,
                         timestamp = System.currentTimeMillis(),
-                        isEncrypted = true
+                        isEncrypted = true,
+                        status = com.quantumchat.core.common.model.MessageStatus.SENT
                     )
 
-                    // 3. Update local state immediately
-                    // For display purposes, we keep the plain-text in memory but flag it as encrypted
-                    val displayMessage = message.copy(content = text)
-                    _state.value = _state.value.copy(
-                        messages = _state.value.messages + displayMessage,
-                        inputText = ""
-                    )
+                    // 2. Save message to local database immediately (UI will auto-update via observation)
+                    messageDao.insertMessage(displayMessage.toEntity())
+
+                    // 3. Serialize and encrypt message content
+                    val jsonStr = Json.encodeToString(displayMessage)
+                    val plainBytes = jsonStr.toByteArray(Charsets.UTF_8)
+                    val cipherBytes = cryptoManager.encryptMessage(plainBytes, targetContact.publicKeyFingerprint)
+
+                    _state.value = _state.value.copy(inputText = "")
 
                     // 4. Send encrypted payload over network transport
-                    transport.sendMessage(message).collect { /* Handle send status */ }
+                    val success = transportManager.send(cipherBytes)
+                    if (!success) {
+                        timber.log.Timber.w("Failed to send message over transport")
+                    }
+                    val isOnline = transportManager.isConnected || transportManager.onlinePeers.first().contains(targetContact.publicKeyFingerprint)
+                    _state.value = _state.value.copy(connectionActive = isOnline)
                 }
                 is ChatUiIntent.UpdateInputText -> {
                     _state.value = _state.value.copy(inputText = intent.text)
                 }
-                is ChatUiIntent.ReceiveMessage -> {
-                    // Decrypt incoming message
-                    val decryptedBytes = cryptoManager.decryptMessage(intent.message.content.toByteArray(Charsets.UTF_8), intent.message.senderId)
-                    val decryptedText = decryptedBytes.toString(Charsets.UTF_8)
-
-                    val displayMessage = intent.message.copy(content = decryptedText)
-                    _state.value = _state.value.copy(
-                        messages = _state.value.messages + displayMessage
-                    )
+                is ChatUiIntent.ForceDiscovery -> {
+                    _state.value = _state.value.copy(isScanningManually = true)
+                    transportManager.startDiscovery()
+                    // Auto-stop manual scan status after 15 seconds
+                    viewModelScope.launch {
+                        delay(15000)
+                        _state.value = _state.value.copy(isScanningManually = false)
+                        if (transportManager.isConnected) {
+                            transportManager.stopDiscovery()
+                        }
+                    }
                 }
             }
+        }
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        transportManager.stopDiscovery()
+        viewModelScope.launch {
+            transportManager.disconnect()
         }
     }
 }
@@ -162,17 +241,28 @@ fun ChatScreen(
                     Column {
                         Text(state.contact?.name ?: contactName, fontWeight = FontWeight.Bold)
                         Row(verticalAlignment = Alignment.CenterVertically) {
+                            val matchingDevice = state.contact?.let { c -> state.discoveredDevices.find { it.fingerprint == c.publicKeyFingerprint } }
+                            val networkText = if (state.connectionActive) {
+                                if (matchingDevice != null) "Secured LAN P2P (${matchingDevice.ipAddress})" else "Secured Server Connection"
+                            } else {
+                                "Reconnecting..."
+                            }
+                            val statusColor = if (state.connectionActive) {
+                                if (matchingDevice != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.tertiary
+                            } else {
+                                MaterialTheme.colorScheme.error
+                            }
                             Box(
                                 modifier = Modifier
                                     .size(6.dp)
                                     .background(
-                                        color = if (state.connectionActive) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.error,
+                                        color = statusColor,
                                         shape = RoundedCornerShape(3.dp)
                                     )
                             )
                             Spacer(modifier = Modifier.width(4.dp))
                             Text(
-                                text = if (state.connectionActive) "Secured Network" else "Reconnecting...",
+                                text = networkText,
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f)
                             )
@@ -182,6 +272,20 @@ fun ChatScreen(
                 navigationIcon = {
                     IconButton(onClick = onNavigateBack) {
                         Text("←", style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.primary)
+                    }
+                },
+                actions = {
+                    if (!state.connectionActive) {
+                        TextButton(
+                            onClick = { viewModel.handleIntent(ChatUiIntent.ForceDiscovery) },
+                            enabled = !state.isScanningManually
+                        ) {
+                            Text(
+                                text = if (state.isScanningManually) "Szukanie..." else "Szukaj 🔍",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -196,6 +300,7 @@ fun ChatScreen(
                 .fillMaxSize()
                 .background(MaterialTheme.colorScheme.background)
                 .padding(innerPadding)
+                .padding(bottom = 16.dp)
         ) {
             // Messages List
             LazyColumn(
@@ -216,7 +321,7 @@ fun ChatScreen(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(16.dp),
+                    .padding(horizontal = 16.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 OutlinedTextField(
@@ -272,6 +377,7 @@ fun MessageBubble(message: Message, isMe: Boolean) {
                 Spacer(modifier = Modifier.height(4.dp))
                 Row(
                     horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text(
@@ -279,6 +385,19 @@ fun MessageBubble(message: Message, isMe: Boolean) {
                         style = MaterialTheme.typography.labelSmall,
                         color = if (isMe) MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.6f) else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
                     )
+                    if (isMe) {
+                        Spacer(modifier = Modifier.width(4.dp))
+                        val statusText = when (message.status) {
+                            com.quantumchat.core.common.model.MessageStatus.SENT -> "✓"
+                            com.quantumchat.core.common.model.MessageStatus.DELIVERED -> "✓✓"
+                            com.quantumchat.core.common.model.MessageStatus.READ -> "✓✓"
+                        }
+                        Text(
+                            text = statusText,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (isMe) MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.8f) else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
+                        )
+                    }
                 }
             }
         }

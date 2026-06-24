@@ -15,5 +15,6 @@ data class Contact(
     val id: String,
     val name: String,
     val publicKeyFingerprint: String,
-    val isOnline: Boolean = false
+    val isOnline: Boolean = false,
+    val onionAddress: String? = null
 )

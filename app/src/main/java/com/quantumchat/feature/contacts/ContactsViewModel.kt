@@ -5,18 +5,28 @@ import androidx.lifecycle.viewModelScope
 import com.quantumchat.core.common.model.Contact
 import com.quantumchat.core.crypto.CryptoManager
 import com.quantumchat.core.data.ContactRepository
+import com.quantumchat.core.networking.TransportManager
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
+import java.util.UUID
 import javax.inject.Inject
+
+// MVI State Errors
+sealed interface ContactsError {
+    data class LoadFailed(val message: String) : ContactsError
+    data class QrVerificationFailed(val message: String) : ContactsError
+    data class DatabaseSaveFailed(val message: String) : ContactsError
+}
 
 // MVI State
 data class ContactsUiState(
     val isLoading: Boolean = false,
     val contacts: List<Contact> = emptyList(),
-    val error: String? = null,
+    val error: ContactsError? = null,
     val isScanningQr: Boolean = false,
     val lastScanResultMessage: String? = null
 )
@@ -24,8 +34,13 @@ data class ContactsUiState(
 // MVI Intent
 sealed interface ContactsUiIntent {
     object LoadContacts : ContactsUiIntent
-    data class AddContact(val name: String) : ContactsUiIntent
+    data class AddContact(
+        val name: String,
+        val fingerprint: String? = null,
+        val address: String? = null
+    ) : ContactsUiIntent
     data class DeleteContact(val contact: Contact) : ContactsUiIntent
+    data class UpdateContact(val contact: Contact) : ContactsUiIntent
     object StartQrScanner : ContactsUiIntent
     object StopQrScanner : ContactsUiIntent
     data class ProcessScannedQR(val qrContent: String) : ContactsUiIntent
@@ -34,7 +49,8 @@ sealed interface ContactsUiIntent {
 @HiltViewModel
 class ContactsViewModel @Inject constructor(
     private val contactRepository: ContactRepository,
-    private val cryptoManager: CryptoManager
+    private val cryptoManager: CryptoManager,
+    private val transportManager: TransportManager
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(ContactsUiState())
@@ -48,17 +64,25 @@ class ContactsViewModel @Inject constructor(
         viewModelScope.launch {
             _state.value = _state.value.copy(isLoading = true)
             try {
-                contactRepository.observeContacts().collect { contactsList ->
+                combine(
+                    contactRepository.observeContacts(),
+                    transportManager.onlinePeers
+                ) { contactsList, onlinePeers ->
+                    contactsList.map { contact ->
+                        val isPeerOnline = onlinePeers.contains(contact.publicKeyFingerprint)
+                        contact.copy(isOnline = isPeerOnline)
+                    }
+                }.collect { contactsList ->
                     _state.value = _state.value.copy(
                         isLoading = false,
                         contacts = contactsList,
-                        error = null
+                        error = if (_state.value.error is ContactsError.LoadFailed) null else _state.value.error
                     )
                 }
             } catch (e: Exception) {
                 _state.value = _state.value.copy(
                     isLoading = false,
-                    error = "Failed to load contacts: ${e.message}"
+                    error = ContactsError.LoadFailed(e.message ?: "Unknown load error")
                 )
             }
         }
@@ -72,28 +96,44 @@ class ContactsViewModel @Inject constructor(
                 }
                 is ContactsUiIntent.AddContact -> {
                     try {
-                        val fingerprint = cryptoManager.generateContactFingerprint()
+                        val fingerprint = if (intent.fingerprint.isNullOrBlank()) {
+                            cryptoManager.generateContactFingerprint()
+                        } else {
+                            intent.fingerprint
+                        }
                         val newContact = Contact(
-                            id = System.currentTimeMillis().toString(),
+                            id = UUID.randomUUID().toString(),
                             name = intent.name,
                             publicKeyFingerprint = fingerprint,
-                            isOnline = true
+                            isOnline = false,
+                            onionAddress = intent.address
                         )
                         contactRepository.addContact(newContact)
                         _state.value = _state.value.copy(error = null)
                     } catch (e: Exception) {
                         _state.value = _state.value.copy(
-                            error = "Failed to add contact: ${e.message}"
+                            error = ContactsError.DatabaseSaveFailed(e.message ?: "Failed to add contact")
+                        )
+                    }
+                }
+                is ContactsUiIntent.UpdateContact -> {
+                    try {
+                        contactRepository.updateContact(intent.contact)
+                        _state.value = _state.value.copy(error = null)
+                    } catch (e: Exception) {
+                        _state.value = _state.value.copy(
+                            error = ContactsError.DatabaseSaveFailed(e.message ?: "Failed to update contact")
                         )
                     }
                 }
                 is ContactsUiIntent.DeleteContact -> {
                     try {
                         contactRepository.deleteContact(intent.contact)
+                        cryptoManager.deleteSession(intent.contact.publicKeyFingerprint)
                         _state.value = _state.value.copy(error = null)
                     } catch (e: Exception) {
                         _state.value = _state.value.copy(
-                            error = "Failed to delete contact: ${e.message}"
+                            error = ContactsError.DatabaseSaveFailed(e.message ?: "Failed to delete contact")
                         )
                     }
                 }
@@ -107,23 +147,43 @@ class ContactsViewModel @Inject constructor(
                     try {
                         val verifiedContact = cryptoManager.extractContactFromQR(intent.qrContent)
                         if (verifiedContact != null) {
-                            contactRepository.addContact(verifiedContact)
-                            _state.value = _state.value.copy(
-                                isScanningQr = false,
-                                lastScanResultMessage = "Successfully verified and added contact.",
-                                error = null
-                            )
+                            try {
+                                val displayName = if (verifiedContact.name == "DEV-MODE" || verifiedContact.name == "Device") {
+                                    "Verified Device (${verifiedContact.publicKeyFingerprint.take(6)})"
+                                } else {
+                                    "Verified ${verifiedContact.name} (${verifiedContact.publicKeyFingerprint.take(6)})"
+                                }
+                                val newContact = Contact(
+                                    id = UUID.randomUUID().toString(),
+                                    name = displayName,
+                                    publicKeyFingerprint = verifiedContact.publicKeyFingerprint,
+                                    isOnline = true,
+                                    onionAddress = verifiedContact.onionAddress
+                                )
+                                contactRepository.addContact(newContact)
+                                _state.value = _state.value.copy(
+                                    isScanningQr = false,
+                                    lastScanResultMessage = "Successfully verified and added contact.",
+                                    error = null
+                                )
+                            } catch (dbEx: Exception) {
+                                _state.value = _state.value.copy(
+                                    isScanningQr = false,
+                                    error = ContactsError.DatabaseSaveFailed(dbEx.message ?: "Database write failed"),
+                                    lastScanResultMessage = null
+                                )
+                            }
                         } else {
                             _state.value = _state.value.copy(
                                 isScanningQr = false,
-                                error = "Verification failed: Invalid QR code signature or scheme.",
+                                error = ContactsError.QrVerificationFailed("Invalid QR code signature or scheme"),
                                 lastScanResultMessage = null
                             )
                         }
                     } catch (e: Exception) {
                         _state.value = _state.value.copy(
                             isScanningQr = false,
-                            error = "Verification failed: ${e.message}",
+                            error = ContactsError.QrVerificationFailed(e.message ?: "Error processing QR payload"),
                             lastScanResultMessage = null
                         )
                     }

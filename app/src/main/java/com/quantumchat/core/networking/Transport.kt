@@ -1,37 +1,38 @@
 package com.quantumchat.core.networking
 
-import com.quantumchat.core.common.Result
-import com.quantumchat.core.common.model.Message
 import kotlinx.coroutines.flow.Flow
 
 /**
  * Interface representing the network transport layer for secure communication.
- * Handles establishing connection, sending encrypted messages, and observing incoming messages.
+ * Handles establishing connection, sending data, and observing incoming messages.
+ * Allows multiple implementations (e.g., Local WiFi, WebSockets, WiFi Direct, Tor).
  */
 interface Transport {
+    /**
+     * Indicates whether the transport is currently connected.
+     */
+    val isConnected: Boolean
 
     /**
-     * Flow tracking the network connection status (true = connected, false = disconnected).
+     * Establishes a connection to the specified target.
+     * Target can be an IP address, a public key fingerprint, or other identifier.
+     * @return true if connection was established successfully, false otherwise.
      */
-    val isConnected: Flow<Boolean>
+    suspend fun connect(target: String): Boolean
 
     /**
-     * Establishes a secure connection to the chat server (e.g. via secure WebSockets or gRPC).
+     * Transmits raw data over the established connection.
+     * @return true if sending succeeded, false otherwise.
      */
-    fun connect(): Flow<Result<Unit>>
+    suspend fun send(data: ByteArray): Boolean
 
     /**
-     * Disconnects from the network server.
+     * Emits incoming raw data in real-time.
      */
-    fun disconnect()
+    fun observeIncoming(): Flow<ByteArray>
 
     /**
-     * Transmits a message to the recipient.
+     * Disconnects the active connection.
      */
-    fun sendMessage(message: Message): Flow<Result<Unit>>
-
-    /**
-     * Emits incoming messages in real-time.
-     */
-    fun observeIncomingMessages(): Flow<Message>
+    suspend fun disconnect()
 }

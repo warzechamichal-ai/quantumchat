@@ -3,7 +3,7 @@ package com.quantumchat.di
 import com.quantumchat.core.crypto.CryptoManager
 import com.quantumchat.core.crypto.CryptoManagerImpl
 import com.quantumchat.core.networking.Transport
-import com.quantumchat.core.networking.TransportImpl
+import com.quantumchat.core.networking.TransportManager
 import dagger.Binds
 import dagger.Module
 import dagger.hilt.InstallIn
@@ -23,6 +23,6 @@ abstract class AppModule {
     @Binds
     @Singleton
     abstract fun bindTransport(
-        transportImpl: TransportImpl
+        transportManager: TransportManager
     ): Transport
 }

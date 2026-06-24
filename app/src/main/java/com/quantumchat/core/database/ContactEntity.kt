@@ -12,7 +12,8 @@ data class ContactEntity(
     @PrimaryKey val id: String,
     val name: String,
     val publicKeyFingerprint: String,
-    val isOnline: Boolean
+    val isOnline: Boolean,
+    val onionAddress: String?
 )
 
 /**
@@ -22,7 +23,8 @@ fun ContactEntity.toDomain(): Contact = Contact(
     id = id,
     name = name,
     publicKeyFingerprint = publicKeyFingerprint,
-    isOnline = isOnline
+    isOnline = isOnline,
+    onionAddress = onionAddress
 )
 
 /**
@@ -32,5 +34,6 @@ fun Contact.toEntity(): ContactEntity = ContactEntity(
     id = id,
     name = name,
     publicKeyFingerprint = publicKeyFingerprint,
-    isOnline = isOnline
+    isOnline = isOnline,
+    onionAddress = onionAddress
 )

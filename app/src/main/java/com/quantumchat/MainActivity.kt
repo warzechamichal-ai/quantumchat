@@ -14,9 +14,11 @@ import androidx.navigation.toRoute
 import com.quantumchat.feature.chat.ChatScreen
 import com.quantumchat.feature.contacts.ContactsScreen
 import com.quantumchat.feature.settings.SettingsScreen
+import com.quantumchat.core.networking.TorManager
 import com.quantumchat.ui.theme.QuantumTheme
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.serialization.Serializable
+import javax.inject.Inject
 
 @Serializable
 object ContactsListDestination
@@ -32,8 +34,17 @@ object SettingsDestination
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
+    @Inject
+    lateinit var torManager: TorManager
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        
+        // Auto-start Tor on startup if enabled and Orbot is installed
+        if (torManager.isAutoStartEnabled && torManager.isOrbotInstalled()) {
+            torManager.startTor()
+        }
+        
         enableEdgeToEdge()
         setContent {
             QuantumTheme {

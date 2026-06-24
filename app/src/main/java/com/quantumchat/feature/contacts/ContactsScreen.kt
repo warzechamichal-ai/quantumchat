@@ -7,8 +7,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
@@ -30,6 +29,10 @@ fun ContactsScreen(
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
 
+    var showAddDialog by remember { mutableStateOf(false) }
+    var contactToEdit by remember { mutableStateOf<Contact?>(null) }
+    var contactToDelete by remember { mutableStateOf<Contact?>(null) }
+
     Box(modifier = Modifier.fillMaxSize()) {
         Scaffold(
             topBar = {
@@ -47,6 +50,15 @@ fun ContactsScreen(
                         containerColor = MaterialTheme.colorScheme.background,
                         titleContentColor = MaterialTheme.colorScheme.primary
                     )
+                )
+            },
+            floatingActionButton = {
+                ExtendedFloatingActionButton(
+                    onClick = { showAddDialog = true },
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary,
+                    icon = { Text("➕", style = MaterialTheme.typography.titleMedium) },
+                    text = { Text("Dodaj kontakt", fontWeight = FontWeight.Bold) }
                 )
             }
         ) { innerPadding ->
@@ -89,7 +101,19 @@ fun ContactsScreen(
                 Spacer(modifier = Modifier.height(16.dp))
 
                 // Error feedback banner
-                if (state.error != null) {
+                state.error?.let { error ->
+                    val errorMessage = when (error) {
+                        is ContactsError.QrVerificationFailed -> {
+                            "⚠️ Błąd weryfikacji QR: ${error.message}. Upewnij się, że skanujesz poprawny kod QR tożsamości."
+                        }
+                        is ContactsError.DatabaseSaveFailed -> {
+                            "💾 Błąd bazy danych: Nie można zapisać kontaktu. Szczegóły: ${error.message}."
+                        }
+                        is ContactsError.LoadFailed -> {
+                            "❌ Błąd wczytywania: Nie udało się pobrać listy kontaktów: ${error.message}."
+                        }
+                    }
+
                     Card(
                         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
                         shape = RoundedCornerShape(8.dp),
@@ -98,7 +122,7 @@ fun ContactsScreen(
                             .padding(bottom = 16.dp)
                     ) {
                         Text(
-                            text = state.error ?: "",
+                            text = errorMessage,
                             style = MaterialTheme.typography.bodyMedium,
                             fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.onErrorContainer,
@@ -136,7 +160,12 @@ fun ContactsScreen(
                         modifier = Modifier.fillMaxSize()
                     ) {
                         items(state.contacts) { contact ->
-                            ContactItem(contact = contact, onClick = { onContactClick(contact) })
+                            ContactItem(
+                                contact = contact,
+                                onClick = { onContactClick(contact) },
+                                onEditClick = { contactToEdit = contact },
+                                onDeleteClick = { contactToDelete = contact }
+                            )
                         }
                     }
                 }
@@ -156,10 +185,189 @@ fun ContactsScreen(
             )
         }
     }
+
+    // Add Contact Dialog
+    if (showAddDialog) {
+        var name by remember { mutableStateOf("") }
+        var fingerprint by remember { mutableStateOf("") }
+        var ipHost by remember { mutableStateOf("") }
+        var onionAddress by remember { mutableStateOf("") }
+
+        AlertDialog(
+            onDismissRequest = { showAddDialog = false },
+            title = { Text("Dodaj nowy kontakt", fontWeight = FontWeight.Bold) },
+            text = {
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    OutlinedTextField(
+                        value = name,
+                        onValueChange = { name = it },
+                        label = { Text("Nazwa (wymagane)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = fingerprint,
+                        onValueChange = { fingerprint = it },
+                        label = { Text("Fingerprint (opcjonalne)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = ipHost,
+                        onValueChange = { ipHost = it },
+                        label = { Text("Adres IP / Host (opcjonalne)") },
+                        singleLine = true,
+                        placeholder = { Text("np. 192.168.1.100:9090") },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = onionAddress,
+                        onValueChange = { onionAddress = it },
+                        label = { Text("Adres .onion (opcjonalne)") },
+                        singleLine = true,
+                        placeholder = { Text("np. abcdef...onion:9095") },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val addr = onionAddress.trim().ifBlank { ipHost.trim().ifBlank { null } }
+                        viewModel.handleIntent(
+                            ContactsUiIntent.AddContact(
+                                name = name.trim(),
+                                fingerprint = fingerprint.trim().ifBlank { null },
+                                address = addr
+                            )
+                        )
+                        showAddDialog = false
+                    },
+                    enabled = name.isNotBlank()
+                ) {
+                    Text("Dodaj")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showAddDialog = false }) {
+                    Text("Anuluj")
+                }
+            }
+        )
+    }
+
+    // Edit Contact Dialog
+    contactToEdit?.let { contact ->
+        val isExistingOnion = contact.onionAddress?.contains(".onion") == true
+        var name by remember { mutableStateOf(contact.name) }
+        var fingerprint by remember { mutableStateOf(contact.publicKeyFingerprint) }
+        var ipHost by remember { mutableStateOf(if (isExistingOnion) "" else (contact.onionAddress ?: "")) }
+        var onionAddress by remember { mutableStateOf(if (isExistingOnion) (contact.onionAddress ?: "") else "") }
+
+        AlertDialog(
+            onDismissRequest = { contactToEdit = null },
+            title = { Text("Edytuj kontakt", fontWeight = FontWeight.Bold) },
+            text = {
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    OutlinedTextField(
+                        value = name,
+                        onValueChange = { name = it },
+                        label = { Text("Nazwa (wymagane)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = fingerprint,
+                        onValueChange = { fingerprint = it },
+                        label = { Text("Fingerprint (wymagane)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = ipHost,
+                        onValueChange = { ipHost = it },
+                        label = { Text("Adres IP / Host (opcjonalne)") },
+                        singleLine = true,
+                        placeholder = { Text("np. 192.168.1.100:9090") },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = onionAddress,
+                        onValueChange = { onionAddress = it },
+                        label = { Text("Adres .onion (opcjonalne)") },
+                        singleLine = true,
+                        placeholder = { Text("np. abcdef...onion:9095") },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val addr = onionAddress.trim().ifBlank { ipHost.trim().ifBlank { null } }
+                        viewModel.handleIntent(
+                            ContactsUiIntent.UpdateContact(
+                                contact.copy(
+                                    name = name.trim(),
+                                    publicKeyFingerprint = fingerprint.trim(),
+                                    onionAddress = addr
+                                )
+                            )
+                        )
+                        contactToEdit = null
+                    },
+                    enabled = name.isNotBlank() && fingerprint.isNotBlank()
+                ) {
+                    Text("Zapisz")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { contactToEdit = null }) {
+                    Text("Anuluj")
+                }
+            }
+        )
+    }
+
+    // Delete Contact Dialog
+    contactToDelete?.let { contact ->
+        AlertDialog(
+            onDismissRequest = { contactToDelete = null },
+            title = { Text("Usuń kontakt", fontWeight = FontWeight.Bold) },
+            text = { Text("Czy na pewno chcesz usunąć kontakt ${contact.name}? Ta operacja usunie również historię czatu oraz powiązaną sesję kryptograficzną.") },
+            confirmButton = {
+                Button(
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                    onClick = {
+                        viewModel.handleIntent(ContactsUiIntent.DeleteContact(contact))
+                        contactToDelete = null
+                    }
+                ) {
+                    Text("Usuń", color = MaterialTheme.colorScheme.onError)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { contactToDelete = null }) {
+                    Text("Anuluj")
+                }
+            }
+        )
+    }
 }
 
 @Composable
-fun ContactItem(contact: Contact, onClick: () -> Unit) {
+fun ContactItem(
+    contact: Contact,
+    onClick: () -> Unit,
+    onEditClick: () -> Unit,
+    onDeleteClick: () -> Unit
+) {
     Card(
         shape = RoundedCornerShape(12.dp),
         colors = CardDefaults.cardColors(
@@ -185,7 +393,23 @@ fun ContactItem(contact: Contact, onClick: () -> Unit) {
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f)
                 )
+                contact.onionAddress?.let { addr ->
+                    if (addr.isNotBlank()) {
+                        Text(
+                            text = "Address: $addr",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.5f)
+                        )
+                    }
+                }
             }
+            IconButton(onClick = onEditClick) {
+                Text("✏️", style = MaterialTheme.typography.bodyLarge)
+            }
+            IconButton(onClick = onDeleteClick) {
+                Text("🗑️", style = MaterialTheme.typography.bodyLarge)
+            }
+            Spacer(modifier = Modifier.width(8.dp))
             Box(
                 modifier = Modifier
                     .size(12.dp)

@@ -14,7 +14,8 @@ data class MessageEntity(
     val recipientId: String,
     val content: String,
     val timestamp: Long,
-    val isEncrypted: Boolean
+    val isEncrypted: Boolean,
+    val status: String
 )
 
 /**
@@ -26,7 +27,8 @@ fun MessageEntity.toDomain(): Message = Message(
     recipientId = recipientId,
     content = content,
     timestamp = timestamp,
-    isEncrypted = isEncrypted
+    isEncrypted = isEncrypted,
+    status = com.quantumchat.core.common.model.MessageStatus.valueOf(status)
 )
 
 /**
@@ -38,5 +40,6 @@ fun Message.toEntity(): MessageEntity = MessageEntity(
     recipientId = recipientId,
     content = content,
     timestamp = timestamp,
-    isEncrypted = isEncrypted
+    isEncrypted = isEncrypted,
+    status = status.name
 )

@@ -21,4 +21,14 @@ interface ContactRepository {
      * Deletes a contact.
      */
     suspend fun deleteContact(contact: Contact)
+
+    /**
+     * Updates an existing contact.
+     */
+    suspend fun updateContact(contact: Contact)
+
+    /**
+     * Gets a contact by ID.
+     */
+    suspend fun getContact(id: String): Contact?
 }
