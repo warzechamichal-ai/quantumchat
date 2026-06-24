@@ -15,6 +15,9 @@ interface ContactDao {
     @Query("SELECT * FROM contacts WHERE id = :id LIMIT 1")
     suspend fun getContactById(id: String): ContactEntity?
 
+    @Query("SELECT * FROM contacts WHERE publicKeyFingerprint = :fingerprint LIMIT 1")
+    suspend fun getContactByFingerprint(fingerprint: String): ContactEntity?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertContact(contact: ContactEntity)
 

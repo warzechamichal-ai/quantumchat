@@ -47,4 +47,27 @@ class ContactRepositoryImplTest {
 
         coVerify { contactDao.deleteContact(any()) }
     }
+
+    @Test
+    fun addContactIfNotExists_whenContactDoesNotExist_callsDaoInsertAndReturnsSuccess() = runTest {
+        val contact = Contact("1", "Alice", "FINGERPRINT1", true)
+        coEvery { contactDao.getContactByFingerprint("FINGERPRINT1") } returns null
+
+        val result = repository.addContactIfNotExists(contact)
+
+        coVerify { contactDao.insertContact(any()) }
+        org.junit.Assert.assertTrue(result.isSuccess)
+    }
+
+    @Test
+    fun addContactIfNotExists_whenContactAlreadyExists_skipsDaoInsertAndReturnsFailure() = runTest {
+        val contact = Contact("1", "Alice", "FINGERPRINT1", true)
+        val existingEntity = ContactEntity("2", "Alice Existing", "FINGERPRINT1", true, null)
+        coEvery { contactDao.getContactByFingerprint("FINGERPRINT1") } returns existingEntity
+
+        val result = repository.addContactIfNotExists(contact)
+
+        coVerify(exactly = 0) { contactDao.insertContact(any()) }
+        org.junit.Assert.assertTrue(result.isFailure)
+    }
 }

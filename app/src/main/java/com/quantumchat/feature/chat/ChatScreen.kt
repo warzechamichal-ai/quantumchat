@@ -35,6 +35,11 @@ import kotlinx.coroutines.delay
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.encodeToString
 import javax.inject.Inject
+import com.quantumchat.core.data.ContactRepository
+import kotlinx.coroutines.Dispatchers
+import androidx.lifecycle.SavedStateHandle
+import androidx.navigation.toRoute
+import com.quantumchat.ChatScreenDestination
 
 // MVI State
 data class ChatUiState(
@@ -59,13 +64,17 @@ sealed interface ChatUiIntent {
 class ChatViewModel @Inject constructor(
     private val cryptoManager: CryptoManager,
     private val transportManager: TransportManager,
-    private val messageDao: MessageDao
+    private val messageDao: MessageDao,
+    private val contactRepository: ContactRepository,
+    savedStateHandle: SavedStateHandle
 ) : ViewModel() {
 
+    private val chatArgs = savedStateHandle.toRoute<ChatScreenDestination>()
     private val _state = MutableStateFlow(ChatUiState())
     val state: StateFlow<ChatUiState> = _state.asStateFlow()
 
     init {
+        timber.log.Timber.d("ChatViewModel INIT - contactId: ${chatArgs.contactId}, contactName: ${chatArgs.contactName}")
 
         // Observe discovered devices in the local network via consolidated flow
         viewModelScope.launch {
@@ -89,77 +98,145 @@ class ChatViewModel @Inject constructor(
             }
         }
 
-        // Intelligent Battery Optimization Loop:
-        // Periodically checks connection status and turns discovery ON/OFF dynamically.
+        // Intelligent Battery Optimization & Direct IP Reconnection Loop:
+        // Periodically checks connection status, retries direct IP transport connection, and manages discovery state.
         viewModelScope.launch {
             while (isActive) {
-                val fingerprint = _state.value.contact?.publicKeyFingerprint
+                val contact = _state.value.contact
+                val fingerprint = contact?.publicKeyFingerprint
                 val isCurrentlyConnected = transportManager.isConnected
-                val isOnline = isCurrentlyConnected || (fingerprint != null && transportManager.onlinePeers.first().contains(fingerprint))
+
+                // Reconnection logic for direct IP targets if disconnected
+                if (!isCurrentlyConnected && contact != null) {
+                    val targetAddress = contact.onionAddress
+                    if (targetAddress != null && targetAddress.matches(Regex("""^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+)?$"""))) {
+                        timber.log.Timber.i("ChatViewModel: Direct IP connection is inactive. Retrying auto-connect to: $targetAddress")
+                        val success = transportManager.connect(targetAddress)
+                        timber.log.Timber.d("ChatViewModel: Auto-connect result to $targetAddress was: $success")
+                    }
+                }
+
+                val isOnline = transportManager.isConnected || (fingerprint != null && transportManager.onlinePeers.first().contains(fingerprint))
                 if (_state.value.connectionActive != isOnline) {
                     _state.value = _state.value.copy(connectionActive = isOnline)
                 }
 
-                if (isCurrentlyConnected) {
+                if (transportManager.isConnected) {
                     // Turn discovery OFF if we already have an active secure connection
                     transportManager.stopDiscovery()
                 } else if (!_state.value.isScanningManually) {
                     // Turn discovery ON to find local devices only if not already connected
                     transportManager.startDiscovery()
                 }
-                delay(3000) // Poll every 3 seconds to keep battery usage minimal
+                delay(5000) // Poll and check connection/discovery state every 5 seconds
             }
         }
     }
 
     fun handleIntent(intent: ChatUiIntent) {
+        timber.log.Timber.d("ChatViewModel handleIntent called with intent: $intent")
         viewModelScope.launch {
             when (intent) {
                 is ChatUiIntent.LoadChat -> {
-                    val fingerprint = "QC-PQ-MOCK-${intent.contactId}"
-                    // Establish secure PQ hybrid session for contact
-                    cryptoManager.establishSecureSession(fingerprint)
+                    timber.log.Timber.d("ChatViewModel: Processing LoadChat intent for contactId=${intent.contactId}")
+                    val contact = contactRepository.getContact(intent.contactId)
+                    timber.log.Timber.i("ChatViewModel: Database query for ID '${intent.contactId}' returned: $contact")
                     
-                    val mockContact = Contact(intent.contactId, intent.contactName, fingerprint, true)
-                    _state.value = _state.value.copy(
-                        contact = mockContact
-                    )
+                    if (contact != null) {
+                        val fingerprint = contact.publicKeyFingerprint
+                        timber.log.Timber.i("ChatViewModel: Successfully loaded contact '${contact.name}'. Fingerprint='$fingerprint', onionAddress='${contact.onionAddress}'")
+                        
+                        val targetAddress = contact.onionAddress ?: fingerprint
+                        val isIp = contact.onionAddress != null && contact.onionAddress.matches(Regex("""^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+)?$"""))
 
-                    // Observe messages from database reactively
-                    viewModelScope.launch {
-                        messageDao.observeMessagesForContact(mockContact.id).collect { entities ->
-                            _state.value = _state.value.copy(
-                                messages = entities.map { it.toDomain() }
-                            )
+                        if (!isIp) {
+                            timber.log.Timber.i("ChatViewModel: Attempting to establish secure PQ hybrid session for contact '${contact.name}' (fingerprint: $fingerprint)")
+                            try {
+                                cryptoManager.establishSecureSession(fingerprint)
+                                timber.log.Timber.i("ChatViewModel: Secure PQ session established successfully for fingerprint: $fingerprint")
+                            } catch (e: Exception) {
+                                timber.log.Timber.e(e, "ChatViewModel: Failed to establish secure PQ session for fingerprint: $fingerprint")
+                            }
                         }
-                    }
 
-                    // Observe online peers flow reactively
-                    viewModelScope.launch {
-                        transportManager.onlinePeers.collect { onlineSet ->
-                            val isOnline = onlineSet.contains(fingerprint) || transportManager.isConnected
-                            _state.value = _state.value.copy(connectionActive = isOnline)
+                        _state.value = _state.value.copy(
+                            contact = contact
+                        )
+
+                        // Observe messages from database reactively
+                        viewModelScope.launch {
+                            messageDao.observeMessagesForContact(contact.id).collect { entities ->
+                                timber.log.Timber.d("ChatViewModel: Observed ${entities.size} messages in database for contact: ${contact.id}")
+                                _state.value = _state.value.copy(
+                                    messages = entities.map { it.toDomain() }
+                                )
+                            }
                         }
-                    }
 
-                    // First check if already discovered in LAN
-                    val matchingDevice = _state.value.discoveredDevices.find { it.fingerprint == fingerprint }
-                    val targetAddress = if (matchingDevice != null) {
-                        "${matchingDevice.ipAddress}:${matchingDevice.port}"
+                        // Observe online peers flow reactively
+                        viewModelScope.launch {
+                            transportManager.onlinePeers.collect { onlineSet ->
+                                val isOnline = onlineSet.contains(fingerprint) || transportManager.isConnected
+                                timber.log.Timber.d("ChatViewModel: Observed onlinePeers update. TargetOnline=${onlineSet.contains(fingerprint)}, TransportConnected=${transportManager.isConnected}")
+                                _state.value = _state.value.copy(connectionActive = isOnline)
+                            }
+                        }
+
+                        // TCP health check / diagnostics for direct IP addresses
+                        if (isIp) {
+                            timber.log.Timber.i("ChatViewModel: Contact address '${contact.onionAddress}' is a direct IP. Running TCP Socket health check...")
+                            viewModelScope.launch(Dispatchers.IO) {
+                                try {
+                                    val parts = contact.onionAddress!!.split(":")
+                                    val host = parts[0]
+                                    val port = if (parts.size > 1) parts[1].toInt() else 9090
+                                    timber.log.Timber.d("ChatViewModel Diagnostics: Testing TCP connection to $host:$port...")
+                                    val testSocket = java.net.Socket()
+                                    testSocket.connect(java.net.InetSocketAddress(host, port), 3000)
+                                    timber.log.Timber.i("ChatViewModel Diagnostics: Direct TCP Socket connection check to $host:$port SUCCEEDED. Destination socket is OPEN and listening.")
+                                    testSocket.close()
+                                } catch (e: Exception) {
+                                    timber.log.Timber.e(e, "ChatViewModel Diagnostics: Direct TCP Socket connection check to ${contact.onionAddress} FAILED. Reason: ${e.message}")
+                                }
+                            }
+                        }
+
+                        // Connect to transport for this contact (TCP IP or WebSocket fingerprint fallback)
+                        timber.log.Timber.i("ChatViewModel: Requesting TransportManager connection to '$targetAddress'")
+                        val connected = transportManager.connect(targetAddress)
+                        timber.log.Timber.i("ChatViewModel: TransportManager connection result for '$targetAddress': connected=$connected")
+                        
+                        if (isIp && connected) {
+                            timber.log.Timber.i("ChatViewModel: TCP Connection successful. Now establishing secure PQ session for fingerprint: $fingerprint")
+                            try {
+                                cryptoManager.establishSecureSession(fingerprint, isNewSession = true)
+                                timber.log.Timber.i("ChatViewModel: Secure PQ session established successfully for fingerprint: $fingerprint")
+                            } catch (e: Exception) {
+                                timber.log.Timber.e(e, "ChatViewModel: Failed to establish secure PQ session for fingerprint: $fingerprint")
+                            }
+                        }
+
+                        val isOnline = connected || transportManager.onlinePeers.first().contains(fingerprint)
+                        _state.value = _state.value.copy(connectionActive = isOnline)
                     } else {
-                        fingerprint
+                        timber.log.Timber.e("ChatViewModel: Contact not found in database for ID: ${intent.contactId}")
                     }
-
-                    // Connect to transport for this contact (TCP IP or WebSocket fingerprint fallback)
-                    val connected = transportManager.connect(targetAddress)
-                    val isOnline = connected || transportManager.onlinePeers.first().contains(fingerprint)
-                    _state.value = _state.value.copy(connectionActive = isOnline)
                 }
                 is ChatUiIntent.SendTextMessage -> {
                     val text = intent.content.trim()
-                    if (text.isEmpty()) return@launch
+                    timber.log.Timber.d("ChatViewModel: Processing SendTextMessage intent. Text length: ${text.length} characters")
+                    if (text.isEmpty()) {
+                        timber.log.Timber.w("ChatViewModel: Cannot send message, text content is empty.")
+                        return@launch
+                    }
 
-                    val targetContact = _state.value.contact ?: return@launch
+                    val targetContact = _state.value.contact
+                    if (targetContact == null) {
+                        timber.log.Timber.e("ChatViewModel: Cannot send message, targetContact is NULL in state.")
+                        return@launch
+                    }
+
+                    timber.log.Timber.i("ChatViewModel: Preparing to send message to contact '${targetContact.name}' (fingerprint: ${targetContact.publicKeyFingerprint})")
 
                     // 1. Build secure Message entity
                     val displayMessage = Message(
@@ -173,6 +250,7 @@ class ChatViewModel @Inject constructor(
                     )
 
                     // 2. Save message to local database immediately (UI will auto-update via observation)
+                    timber.log.Timber.d("ChatViewModel: Saving outgoing message to database: ${displayMessage.id}")
                     messageDao.insertMessage(displayMessage.toEntity())
 
                     // 3. Serialize and encrypt message content
@@ -227,10 +305,12 @@ fun ChatScreen(
     onNavigateBack: () -> Unit,
     viewModel: ChatViewModel = hiltViewModel()
 ) {
+    timber.log.Timber.d("ChatScreen Composable: Rendering with contactId=$contactId, contactName=$contactName")
     val state by viewModel.state.collectAsState()
 
     // Initialize screen state with passed parameters
     androidx.compose.runtime.LaunchedEffect(contactId, contactName) {
+        timber.log.Timber.d("ChatScreen LaunchedEffect: Triggering LoadChat for contactId=$contactId")
         viewModel.handleIntent(ChatUiIntent.LoadChat(contactId, contactName))
     }
 

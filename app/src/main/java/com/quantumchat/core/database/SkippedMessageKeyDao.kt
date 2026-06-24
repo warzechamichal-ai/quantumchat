@@ -27,4 +27,7 @@ interface SkippedMessageKeyDao {
 
     @Query("DELETE FROM skipped_message_keys WHERE contactFingerprint = :contactFingerprint")
     suspend fun deleteSkippedMessageKeysForContact(contactFingerprint: String)
+
+    @Query("SELECT COUNT(*) FROM skipped_message_keys WHERE contactFingerprint = :contactFingerprint")
+    suspend fun getSkippedKeysCount(contactFingerprint: String): Int
 }

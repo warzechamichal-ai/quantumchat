@@ -20,6 +20,7 @@ sealed interface ContactsError {
     data class LoadFailed(val message: String) : ContactsError
     data class QrVerificationFailed(val message: String) : ContactsError
     data class DatabaseSaveFailed(val message: String) : ContactsError
+    data class ContactAlreadyExists(val message: String) : ContactsError
 }
 
 // MVI State
@@ -44,6 +45,7 @@ sealed interface ContactsUiIntent {
     object StartQrScanner : ContactsUiIntent
     object StopQrScanner : ContactsUiIntent
     data class ProcessScannedQR(val qrContent: String) : ContactsUiIntent
+    object ClearError : ContactsUiIntent
 }
 
 @HiltViewModel
@@ -108,8 +110,14 @@ class ContactsViewModel @Inject constructor(
                             isOnline = false,
                             onionAddress = intent.address
                         )
-                        contactRepository.addContact(newContact)
-                        _state.value = _state.value.copy(error = null)
+                        val result = contactRepository.addContactIfNotExists(newContact)
+                        if (result.isSuccess) {
+                            _state.value = _state.value.copy(error = null)
+                        } else {
+                            _state.value = _state.value.copy(
+                                error = ContactsError.ContactAlreadyExists("Ten kontakt już istnieje")
+                            )
+                        }
                     } catch (e: Exception) {
                         _state.value = _state.value.copy(
                             error = ContactsError.DatabaseSaveFailed(e.message ?: "Failed to add contact")
@@ -160,12 +168,20 @@ class ContactsViewModel @Inject constructor(
                                     isOnline = true,
                                     onionAddress = verifiedContact.onionAddress
                                 )
-                                contactRepository.addContact(newContact)
-                                _state.value = _state.value.copy(
-                                    isScanningQr = false,
-                                    lastScanResultMessage = "Successfully verified and added contact.",
-                                    error = null
-                                )
+                                val result = contactRepository.addContactIfNotExists(newContact)
+                                if (result.isSuccess) {
+                                    _state.value = _state.value.copy(
+                                        isScanningQr = false,
+                                        lastScanResultMessage = "Successfully verified and added contact.",
+                                        error = null
+                                    )
+                                } else {
+                                    _state.value = _state.value.copy(
+                                        isScanningQr = false,
+                                        error = ContactsError.ContactAlreadyExists("Ten kontakt już istnieje"),
+                                        lastScanResultMessage = null
+                                    )
+                                }
                             } catch (dbEx: Exception) {
                                 _state.value = _state.value.copy(
                                     isScanningQr = false,
@@ -175,9 +191,9 @@ class ContactsViewModel @Inject constructor(
                             }
                         } else {
                             _state.value = _state.value.copy(
-                                isScanningQr = false,
-                                error = ContactsError.QrVerificationFailed("Invalid QR code signature or scheme"),
-                                lastScanResultMessage = null
+                                  isScanningQr = false,
+                                  error = ContactsError.QrVerificationFailed("Invalid QR code signature or scheme"),
+                                  lastScanResultMessage = null
                             )
                         }
                     } catch (e: Exception) {
@@ -187,6 +203,9 @@ class ContactsViewModel @Inject constructor(
                             lastScanResultMessage = null
                         )
                     }
+                }
+                is ContactsUiIntent.ClearError -> {
+                    _state.value = _state.value.copy(error = null)
                 }
             }
         }

@@ -18,6 +18,9 @@ class QRCodeAnalyzer(
     private val onQrCodeScanned: (String) -> Unit
 ) : ImageAnalysis.Analyzer {
 
+    private var hasSuccessfullyScanned = false
+    private var lastScannedTime: Long = 0
+
     // Configure the scanner to ONLY detect QR Codes for performance optimization
     private val scanner = BarcodeScanning.getClient(
         BarcodeScannerOptions.Builder()
@@ -27,6 +30,14 @@ class QRCodeAnalyzer(
 
     @OptIn(ExperimentalGetImage::class)
     override fun analyze(imageProxy: ImageProxy) {
+        val now = System.currentTimeMillis()
+        if (hasSuccessfullyScanned && now - lastScannedTime < 3000) {
+            imageProxy.close()
+            return
+        } else if (hasSuccessfullyScanned && now - lastScannedTime >= 3000) {
+            hasSuccessfullyScanned = false
+        }
+
         val mediaImage = imageProxy.image
         if (mediaImage != null) {
             // Convert Media.Image to ML Kit input format
@@ -36,8 +47,12 @@ class QRCodeAnalyzer(
                 .addOnSuccessListener { barcodes ->
                     for (barcode in barcodes) {
                         barcode.rawValue?.let { qrValue ->
-                            Timber.d("QR Code scanned successfully: $qrValue")
-                            onQrCodeScanned(qrValue)
+                            if (!hasSuccessfullyScanned) {
+                                hasSuccessfullyScanned = true
+                                lastScannedTime = System.currentTimeMillis()
+                                Timber.d("QR Code scanned successfully: $qrValue")
+                                onQrCodeScanned(qrValue)
+                            }
                         }
                     }
                 }

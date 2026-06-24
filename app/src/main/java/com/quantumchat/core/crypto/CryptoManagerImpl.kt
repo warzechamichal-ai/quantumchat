@@ -140,17 +140,27 @@ class CryptoManagerImpl @Inject constructor(
         }
     }
 
-    override fun establishSecureSession(contactFingerprint: String): Boolean {
+    override fun establishSecureSession(contactFingerprint: String, isNewSession: Boolean): Boolean {
+        Timber.i("Establishing new Double Ratchet session for fingerprint: $contactFingerprint (isNewSession=$isNewSession)")
         val keyPair = localKeyPair
         if (keyPair == null) {
             Timber.e("Local identity key pair is null – cannot proceed")
             return false
         }
         return try {
-            // Check if there is a saved state in DB first
-            val savedEntity = runBlocking { ratchetStateDao.getRatchetState(contactFingerprint) }
+            if (isNewSession) {
+                Timber.i("Creating FRESH Double Ratchet session for fingerprint: $contactFingerprint (isNewSession=true)")
+                deleteSession(contactFingerprint)
+                Timber.i("Deleted old ratchet state from DB before creating new one")
+            }
+
+            // Check if there is a saved state in DB first (only if isNewSession is false)
+            val savedEntity = if (!isNewSession) {
+                runBlocking { ratchetStateDao.getRatchetState(contactFingerprint) }
+            } else null
+
             if (savedEntity != null) {
-                Timber.i("Loaded existing ratchet state from database for fingerprint: $contactFingerprint")
+                Timber.i("Loaded existing ratchet state from DB")
                 val kf = KeyFactory.getInstance("X25519", "BC")
                 
                 val localPubSpec = X509EncodedKeySpec(savedEntity.localDhPublicKey)
@@ -175,9 +185,13 @@ class CryptoManagerImpl @Inject constructor(
                     pendingKyberCiphertext = savedEntity.pendingKyberCiphertext
                 )
                 ratchetStates[contactFingerprint] = state
+                val digest = MessageDigest.getInstance("SHA-256")
+                val rootKeyHash = digest.digest(state.rootKey).take(8).joinToString("") { "%02x".format(it) }
+                Timber.i("Loaded existing ratchet state from DB. rootKey hash: $rootKeyHash")
                 return true
             }
 
+            Timber.i("Creating new ratchet state")
             // Otherwise, derive new session state...
             val recipientPublicKey = contactPublicKeys[contactFingerprint]
             val localKP = localKeyPair
@@ -197,7 +211,7 @@ class CryptoManagerImpl @Inject constructor(
                 ka.generateSecret()
             } else {
                 Timber.d("Classical step: Fallback to fingerprint-derived key.")
-                digest.digest(contactFingerprint.toByteArray(Charsets.UTF_8))
+                digest.digest(getFallbackSeedBytes(contactFingerprint))
             }
 
             // 2. Hybrid key agreement combining classical X25519 and post-quantum ML-KEM (Kyber-768)
@@ -262,7 +276,8 @@ class CryptoManagerImpl @Inject constructor(
 
             // Save new state to DB
             saveRatchetStateToDb(contactFingerprint, state)
-            Timber.i("Ratchet state initialized and saved to database for fingerprint: $contactFingerprint")
+            val rootKeyHash = digest.digest(state.rootKey).take(8).joinToString("") { "%02x".format(it) }
+            Timber.i("Ratchet state initialized and saved to database for fingerprint: $contactFingerprint. rootKey hash: $rootKeyHash")
             true
         } catch (e: Exception) {
             Timber.e(e, "Failed to establish secure session.")
@@ -319,7 +334,7 @@ class CryptoManagerImpl @Inject constructor(
                         ka.doPhase(recipientPublicKey!!, true)
                         ka.generateSecret()
                     } else {
-                        digest.digest(contactId.toByteArray(Charsets.UTF_8))
+                        digest.digest(getFallbackSeedBytes(contactId))
                     }
 
                     // Call performHybridKeyAgreement to get the ciphertext
@@ -435,7 +450,7 @@ class CryptoManagerImpl @Inject constructor(
                         ka.doPhase(recipientPublicKey!!, true)
                         ka.generateSecret()
                     } else {
-                        digest.digest(contactId.toByteArray(Charsets.UTF_8))
+                        digest.digest(getFallbackSeedBytes(contactId))
                     }
 
                     // Decapsulate using our private Kyber key and derive the real rootKey
@@ -527,17 +542,28 @@ class CryptoManagerImpl @Inject constructor(
 
             plainBytes
         } catch (e: Exception) {
-            Timber.e(e, "CryptoManagerImpl: Decryption failed (BAD_DECRYPT) for contact: $contactId. Resetting session to recover.")
-            // Reset ratchet state in memory and database to force a fresh hybrid key agreement on next message
-            ratchetStates.remove(contactId)
-            runBlocking {
+            val currentState = ratchetStates[contactId]
+            val rootKeyHash = currentState?.let {
                 try {
-                    ratchetStateDao.deleteRatchetState(contactId)
-                    Timber.d("CryptoManagerImpl: Cleared ratchet state for contact $contactId to recover from decryption failure.")
-                } catch (dbEx: Exception) {
-                    Timber.e(dbEx, "Failed to clear ratchet state from database")
-                }
+                    val digest = MessageDigest.getInstance("SHA-256")
+                    java.util.Base64.getEncoder().encodeToString(digest.digest(it.rootKey))
+                } catch (ex: Exception) { "unknown" }
+            } ?: "no_state"
+            val sendingN = currentState?.sendingMessageNumber ?: -1
+            val receivingN = currentState?.receivingMessageNumber ?: -1
+            val skippedCount = runBlocking {
+                try {
+                    skippedMessageKeyDao.getSkippedKeysCount(contactId)
+                } catch (ex: Exception) { -1 }
             }
+            Timber.e(e, "CryptoManagerImpl: Decryption failed (BAD_DECRYPT) for contact: $contactId. " +
+                    "Diagnostics: sendingMessageNumber=$sendingN, receivingMessageNumber=$receivingN, " +
+                    "rootKeyHash=$rootKeyHash, skippedKeysCount=$skippedCount")
+            
+            // Rollback in-memory state so that it has to be reloaded next time
+            ratchetStates.remove(contactId)
+            Timber.i("CryptoManagerImpl: Removed corrupted in-memory ratchet state for contact $contactId to force reload on next attempt.")
+            
             ByteArray(0)
         }
     }
@@ -585,21 +611,11 @@ class CryptoManagerImpl @Inject constructor(
         val pubB64 = java.util.Base64.getEncoder().encodeToString(kp.public.encoded)
         val fingerprint = getLocalIdentityFingerprint()
 
-        val dilithiumKp = localDilithiumKeyPair
-        val dilithiumB64 = if (dilithiumKp != null) {
-            val pubInfo = SubjectPublicKeyInfoFactory.createSubjectPublicKeyInfo(dilithiumKp.public)
-            java.util.Base64.getEncoder().encodeToString(pubInfo.encoded)
-        } else {
-            "NO-DILITHIUM"
-        }
-
-        val kyberKp = localKyberKeyPair
-        val kyberB64 = if (kyberKp != null) {
-            val pubInfo = SubjectPublicKeyInfoFactory.createSubjectPublicKeyInfo(kyberKp.public)
-            java.util.Base64.getEncoder().encodeToString(pubInfo.encoded)
-        } else {
-            "NO-KYBER"
-        }
+        // To prevent QR Code generation failure due to size limits (> 2953 bytes in binary mode),
+        // we omit full post-quantum public keys from the QR code.
+        // The protocol will fall back to fingerprint-derived deterministic ML-KEM/ML-DSA.
+        val dilithiumB64 = "NO-DILITHIUM"
+        val kyberB64 = "NO-KYBER"
 
         val onionAddress = torManager.get().onionAddress.value ?: "NO-ONION"
         return "QC-IDENTITY:$fingerprint:$pubB64:$dilithiumB64:$kyberB64:$onionAddress"
@@ -767,6 +783,12 @@ class CryptoManagerImpl @Inject constructor(
         return mac.doFinal(data)
     }
 
+    private fun getFallbackSeedBytes(contactFingerprint: String): ByteArray {
+        val local = getLocalIdentityFingerprint()
+        val sorted = if (local < contactFingerprint) local + contactFingerprint else contactFingerprint + local
+        return sorted.toByteArray(Charsets.UTF_8)
+    }
+
     private fun calculateDH(
         localPrivate: java.security.PrivateKey,
         remotePublic: java.security.PublicKey,
@@ -775,7 +797,7 @@ class CryptoManagerImpl @Inject constructor(
     ): ByteArray {
         if (isFallback) {
             val digest = MessageDigest.getInstance("SHA-256")
-            return digest.digest(contactFingerprint.toByteArray(Charsets.UTF_8))
+            return digest.digest(getFallbackSeedBytes(contactFingerprint))
         }
         return try {
             val ka = KeyAgreement.getInstance("X25519", "BC")
@@ -785,7 +807,7 @@ class CryptoManagerImpl @Inject constructor(
         } catch (e: Exception) {
             Timber.w("Real DH agreement failed, falling back. Error: ${e.message}")
             val digest = MessageDigest.getInstance("SHA-256")
-            digest.digest(contactFingerprint.toByteArray(Charsets.UTF_8))
+            digest.digest(getFallbackSeedBytes(contactFingerprint))
         }
     }
 

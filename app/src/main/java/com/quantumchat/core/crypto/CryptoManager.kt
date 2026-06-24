@@ -39,7 +39,7 @@ interface CryptoManager {
     /**
      * Nawiązuje bezpieczną sesję z kontaktem.
      */
-    fun establishSecureSession(contactFingerprint: String): Boolean
+    fun establishSecureSession(contactFingerprint: String, isNewSession: Boolean = false): Boolean
 
     /**
      * Wykonuje hybrydowe uzgadnianie kluczy (X25519 + ML-KEM).

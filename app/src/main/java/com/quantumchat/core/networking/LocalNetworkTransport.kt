@@ -1,10 +1,14 @@
 package com.quantumchat.core.networking
 
+import com.quantumchat.core.crypto.CryptoManager
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import timber.log.Timber
 import java.io.InputStream
+import java.io.IOException
+import java.net.BindException
+import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
@@ -20,7 +24,9 @@ import javax.inject.Singleton
  * Uses a simple framing protocol: [4 bytes payload length] + [payload bytes].
  */
 @Singleton
-class LocalNetworkTransport @Inject constructor() : Transport {
+class LocalNetworkTransport @Inject constructor(
+    private val cryptoManager: CryptoManager
+) : Transport {
 
     private val _isConnected = AtomicBoolean(false)
     override val isConnected: Boolean
@@ -39,24 +45,92 @@ class LocalNetworkTransport @Inject constructor() : Transport {
     private fun startServer() {
         serverJob = scope.launch {
             try {
-                // Listen on all network interfaces
-                val server = ServerSocket(9090)
+                Timber.d("LocalNetworkTransport: Attempting to start ServerSocket. Binding port 9090...")
+                val server = ServerSocket()
+                server.reuseAddress = true
+                
+                val bindAddress = InetSocketAddress(InetAddress.getByName("0.0.0.0"), 9090)
+                server.bind(bindAddress)
                 serverSocket = server
-                Timber.d("LocalNetworkTransport ServerSocket started on port 9090")
+                Timber.i("LocalNetworkTransport: ServerSocket successfully bound and listening on ${server.localSocketAddress}")
+                
                 while (isActive) {
+                    Timber.d("LocalNetworkTransport: ServerSocket waiting for incoming connections...")
                     val socket = server.accept()
-                    Timber.d("Accepted local connection from: ${socket.remoteSocketAddress}")
+                    Timber.i("LocalNetworkTransport: Accepted incoming TCP connection from remote address: ${socket.remoteSocketAddress} (Local port: ${socket.localPort})")
                     launch {
-                        handleIncomingClient(socket)
+                        try {
+                            Timber.i("LocalNetworkTransport Handshake (Incoming): Initiating handshake for client ${socket.remoteSocketAddress}...")
+                            
+                            // 1. Read remote fingerprint
+                            val inputStream = socket.getInputStream()
+                            val lenBytes = ByteArray(4)
+                            var readBytes = 0
+                            while (readBytes < 4) {
+                                val read = withContext(Dispatchers.IO) {
+                                    inputStream.read(lenBytes, readBytes, 4 - readBytes)
+                                }
+                                if (read == -1) throw IOException("Handshake failed: EOF reading remote fingerprint length")
+                                readBytes += read
+                            }
+                            val length = ByteBuffer.wrap(lenBytes).int
+                            if (length <= 0 || length > 1024) throw IOException("Handshake failed: invalid remote fingerprint length: $length")
+                            
+                            val remoteBytes = ByteArray(length)
+                            var readPayload = 0
+                            while (readPayload < length) {
+                                val read = withContext(Dispatchers.IO) {
+                                    inputStream.read(remoteBytes, readPayload, length - readPayload)
+                                }
+                                if (read == -1) throw IOException("Handshake failed: EOF reading remote fingerprint")
+                                readPayload += read
+                            }
+                            val remoteFingerprint = String(remoteBytes, Charsets.UTF_8)
+                            Timber.i("LocalNetworkTransport Handshake (Incoming): Received remote fingerprint: $remoteFingerprint")
+
+                            // 2. Send local fingerprint
+                            val localFingerprint = cryptoManager.getLocalIdentityFingerprint()
+                            Timber.i("LocalNetworkTransport Handshake (Incoming): Sending local fingerprint: $localFingerprint")
+                            val localFingerprintBytes = localFingerprint.toByteArray(Charsets.UTF_8)
+                            val lengthBuffer = ByteBuffer.allocate(4).putInt(localFingerprintBytes.size).array()
+                            val outputStream = socket.getOutputStream()
+                            withContext(Dispatchers.IO) {
+                                outputStream.write(lengthBuffer)
+                                outputStream.write(localFingerprintBytes)
+                                outputStream.flush()
+                            }
+                            Timber.i("LocalNetworkTransport Handshake (Incoming): Local fingerprint sent.")
+
+                            // 3. Establish secure session
+                            val isInitiator = localFingerprint < remoteFingerprint
+                            val role = if (isInitiator) "Alice (Initiator)" else "Bob (Responder)"
+                            Timber.i("LocalNetworkTransport Handshake (Incoming): Role determined as: $role")
+
+                            val sessionEstablished = cryptoManager.establishSecureSession(remoteFingerprint, isNewSession = true)
+                            Timber.i("LocalNetworkTransport Handshake (Incoming): Session establishment status: $sessionEstablished")
+
+                            // 4. Handle incoming messages
+                            handleIncomingClient(socket)
+                        } catch (e: Exception) {
+                            Timber.e(e, "LocalNetworkTransport Handshake (Incoming): Failed for client ${socket.remoteSocketAddress}")
+                            try { socket.close() } catch (ex: Exception) {}
+                        }
                     }
                 }
+            } catch (be: BindException) {
+                Timber.e(be, "LocalNetworkTransport ServerSocket BIND FAILED on port 9090. Port is likely already in use.")
+            } catch (ioe: IOException) {
+                Timber.e(ioe, "LocalNetworkTransport ServerSocket encountered an IO Exception during binding or accepting connections.")
             } catch (e: Exception) {
-                Timber.e(e, "ServerSocket error or closed in LocalNetworkTransport")
+                Timber.e(e, "LocalNetworkTransport ServerSocket encountered unexpected exception.")
+            } finally {
+                Timber.d("LocalNetworkTransport: ServerSocket startServer loop finished.")
             }
         }
     }
 
     private suspend fun handleIncomingClient(socket: Socket) {
+        Timber.d("LocalNetworkTransport: Starting client session for incoming socket: remote=${socket.remoteSocketAddress}, localPort=${socket.localPort}")
         socket.use { s ->
             try {
                 val inputStream = s.getInputStream()
@@ -69,14 +143,15 @@ class LocalNetworkTransport @Inject constructor() : Transport {
                             inputStream.read(lengthBuffer, bytesRead, 4 - bytesRead)
                         }
                         if (read == -1) {
-                            Timber.d("Local connection EOF reached for client: ${s.remoteSocketAddress}")
+                            Timber.d("LocalNetworkTransport: EOF reached while reading length prefix from remote=${s.remoteSocketAddress}")
                             return
                         }
                         bytesRead += read
                     }
                     val length = ByteBuffer.wrap(lengthBuffer).int
+                    Timber.v("LocalNetworkTransport: Read incoming length prefix: $length bytes from remote=${s.remoteSocketAddress}")
                     if (length <= 0 || length > 10 * 1024 * 1024) { // 10MB limit
-                        Timber.w("LocalNetworkTransport: Received invalid payload length: $length")
+                        Timber.w("LocalNetworkTransport: Received invalid payload length: $length from remote=${s.remoteSocketAddress}")
                         return
                     }
 
@@ -88,17 +163,19 @@ class LocalNetworkTransport @Inject constructor() : Transport {
                             inputStream.read(payload, payloadBytesRead, length - payloadBytesRead)
                         }
                         if (read == -1) {
-                            Timber.w("Local connection EOF reached during payload read")
+                            Timber.w("LocalNetworkTransport: EOF reached while reading payload bytes from remote=${s.remoteSocketAddress}")
                             return
                         }
                         payloadBytesRead += read
                     }
 
-                    Timber.i("LocalNetworkTransport received payload of size $length bytes")
+                    Timber.i("LocalNetworkTransport: Received payload of size $length bytes from remote=${s.remoteSocketAddress} (emitting to flow)")
                     _incoming.emit(payload)
                 }
             } catch (e: Exception) {
-                Timber.w("LocalNetworkTransport client connection closed: ${e.message}")
+                Timber.w(e, "LocalNetworkTransport: Incoming client connection closed with exception: ${e.message} for remote=${s.remoteSocketAddress}")
+            } finally {
+                Timber.d("LocalNetworkTransport: Ended client session for remote=${s.remoteSocketAddress}")
             }
         }
     }
@@ -107,7 +184,7 @@ class LocalNetworkTransport @Inject constructor() : Transport {
         disconnect()
         // If target looks like a fingerprint (starts with QC-PQ), don't attempt IP connection
         if (target.startsWith("QC-PQ-")) {
-            Timber.d("LocalNetworkTransport: target '$target' is a fingerprint, skipping.")
+            Timber.d("LocalNetworkTransport: target '$target' is a fingerprint, skipping direct TCP connection.")
             return false
         }
 
@@ -117,15 +194,58 @@ class LocalNetworkTransport @Inject constructor() : Transport {
                 val host = parts[0]
                 val port = if (parts.size > 1) parts[1].toInt() else 9090
 
-                Timber.d("LocalNetworkTransport: Connecting to $host:$port")
+                Timber.i("LocalNetworkTransport: Connecting outgoing socket to target: $host:$port")
                 val socket = Socket()
                 socket.connect(InetSocketAddress(host, port), 5000) // 5 seconds connection timeout
+                Timber.i("LocalNetworkTransport: Outgoing TCP connection to $host:$port established. Starting handshake...")
+                
+                // 1. Send our fingerprint
+                val localFingerprint = cryptoManager.getLocalIdentityFingerprint()
+                Timber.i("LocalNetworkTransport Handshake (Outgoing): Sending local fingerprint: $localFingerprint")
+                val localFingerprintBytes = localFingerprint.toByteArray(Charsets.UTF_8)
+                val lengthBuffer = ByteBuffer.allocate(4).putInt(localFingerprintBytes.size).array()
+                val outputStream = socket.getOutputStream()
+                outputStream.write(lengthBuffer)
+                outputStream.write(localFingerprintBytes)
+                outputStream.flush()
+                Timber.i("LocalNetworkTransport Handshake (Outgoing): Local fingerprint sent. Reading remote fingerprint...")
+
+                // 2. Read remote fingerprint
+                val inputStream = socket.getInputStream()
+                val lenBytes = ByteArray(4)
+                var readBytes = 0
+                while (readBytes < 4) {
+                    val read = inputStream.read(lenBytes, readBytes, 4 - readBytes)
+                    if (read == -1) throw IOException("Handshake failed: EOF reading fingerprint length")
+                    readBytes += read
+                }
+                val length = ByteBuffer.wrap(lenBytes).int
+                if (length <= 0 || length > 1024) throw IOException("Handshake failed: invalid remote fingerprint length: $length")
+                
+                val remoteBytes = ByteArray(length)
+                var readPayload = 0
+                while (readPayload < length) {
+                    val read = inputStream.read(remoteBytes, readPayload, length - readPayload)
+                    if (read == -1) throw IOException("Handshake failed: EOF reading remote fingerprint")
+                    readPayload += read
+                }
+                val remoteFingerprint = String(remoteBytes, Charsets.UTF_8)
+                Timber.i("LocalNetworkTransport Handshake (Outgoing): Received remote fingerprint: $remoteFingerprint")
+
+                // 3. Establish secure session
+                val isInitiator = localFingerprint < remoteFingerprint
+                val role = if (isInitiator) "Alice (Initiator)" else "Bob (Responder)"
+                Timber.i("LocalNetworkTransport Handshake (Outgoing): Role determined as: $role")
+                
+                val sessionEstablished = cryptoManager.establishSecureSession(remoteFingerprint, isNewSession = true)
+                Timber.i("LocalNetworkTransport Handshake (Outgoing): Session establishment status: $sessionEstablished")
+
                 outgoingSocket = socket
                 _isConnected.set(true)
-                Timber.i("LocalNetworkTransport: Connected to $host:$port successfully.")
+                Timber.i("LocalNetworkTransport: Outgoing connection to $host:$port successfully established. Local address: ${socket.localSocketAddress}")
                 true
             } catch (e: Exception) {
-                Timber.w("LocalNetworkTransport: Failed to connect to target '$target': ${e.message}")
+                Timber.w(e, "LocalNetworkTransport: Failed to connect to target '$target': ${e.message}")
                 _isConnected.set(false)
                 false
             }
@@ -135,22 +255,23 @@ class LocalNetworkTransport @Inject constructor() : Transport {
     override suspend fun send(data: ByteArray): Boolean {
         val socket = outgoingSocket
         if (socket == null || !socket.isConnected || socket.isClosed) {
-            Timber.w("LocalNetworkTransport send failed: not connected.")
+            Timber.w("LocalNetworkTransport: Send failed because socket is null, disconnected, or closed.")
             _isConnected.set(false)
             return false
         }
 
         return withContext(Dispatchers.IO) {
             try {
+                Timber.d("LocalNetworkTransport: Sending payload of size ${data.size} bytes to ${socket.remoteSocketAddress}...")
                 val outputStream = socket.getOutputStream()
                 val lengthBuffer = ByteBuffer.allocate(4).putInt(data.size).array()
                 outputStream.write(lengthBuffer)
                 outputStream.write(data)
                 outputStream.flush()
-                Timber.i("LocalNetworkTransport: Sent ${data.size} bytes successfully.")
+                Timber.i("LocalNetworkTransport: Successfully wrote and flushed ${data.size} bytes to ${socket.remoteSocketAddress}.")
                 true
             } catch (e: Exception) {
-                Timber.e(e, "LocalNetworkTransport: Failed to send data")
+                Timber.e(e, "LocalNetworkTransport: Failed to write data to ${socket.remoteSocketAddress}")
                 _isConnected.set(false)
                 try { socket.close() } catch (ex: Exception) {}
                 outgoingSocket = null
@@ -163,14 +284,18 @@ class LocalNetworkTransport @Inject constructor() : Transport {
 
     override suspend fun disconnect() {
         withContext(Dispatchers.IO) {
-            try {
-                outgoingSocket?.close()
-            } catch (e: Exception) {
-                // Ignore
+            val socket = outgoingSocket
+            if (socket != null) {
+                Timber.d("LocalNetworkTransport: Disconnecting outgoing socket: remote=${socket.remoteSocketAddress}")
+                try {
+                    socket.close()
+                    Timber.i("LocalNetworkTransport: Outgoing socket successfully closed.")
+                } catch (e: Exception) {
+                    Timber.w(e, "LocalNetworkTransport: Exception while closing outgoing socket")
+                }
             }
             outgoingSocket = null
             _isConnected.set(false)
-            Timber.d("LocalNetworkTransport: Disconnected outgoing socket.")
         }
     }
 
@@ -178,11 +303,13 @@ class LocalNetworkTransport @Inject constructor() : Transport {
      * Shuts down the background ServerSocket and cancels the coroutine job.
      */
     fun shutdown() {
+        Timber.i("LocalNetworkTransport: Shutting down transport services...")
         serverJob?.cancel()
         try {
             serverSocket?.close()
+            Timber.i("LocalNetworkTransport: ServerSocket successfully closed.")
         } catch (e: Exception) {
-            // Ignore
+            Timber.w(e, "LocalNetworkTransport: Exception while closing ServerSocket")
         }
     }
 }

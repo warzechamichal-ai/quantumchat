@@ -170,6 +170,7 @@ class TransportManager @Inject constructor(
         get() = activeTransport?.isConnected ?: false
 
     override suspend fun connect(target: String): Boolean {
+        Timber.i("TransportManager.connect() called with target: $target")
         disconnect()
         
         var resolvedTarget = target
@@ -203,7 +204,7 @@ class TransportManager @Inject constructor(
         // Select prioritized order of transports based on target format
         val prioritizedList = getPrioritizedTransports(resolvedTarget)
         
-        Timber.d("TransportManager: Attempting connection to target '$resolvedTarget' (original: '$target'). Order: ${prioritizedList.map { it.javaClass.simpleName }}")
+        Timber.i("TransportManager: Attempting connection to target '$resolvedTarget' (original: '$target'). First transport selected: ${prioritizedList.firstOrNull()?.javaClass?.simpleName}. Order: ${prioritizedList.map { it.javaClass.simpleName }}")
         
         for (transport in prioritizedList) {
             try {
@@ -352,7 +353,10 @@ class TransportManager @Inject constructor(
         val list = when {
             isOnion -> listOf(torTransport, localNetworkTransport, wiFiDirectTransport, webSocketTransport)
             isMacFormat -> listOf(wiFiDirectTransport, localNetworkTransport, webSocketTransport)
-            isIpFormat -> listOf(localNetworkTransport, wiFiDirectTransport, webSocketTransport)
+            isIpFormat -> {
+                Timber.i("TransportManager: Selected LocalNetworkTransport because target looks like IP address: $target")
+                listOf(localNetworkTransport, wiFiDirectTransport, webSocketTransport)
+            }
             else -> listOf(webSocketTransport, torTransport, localNetworkTransport, wiFiDirectTransport)
         }
 

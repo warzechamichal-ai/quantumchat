@@ -34,6 +34,7 @@ class ContactsViewModelTest {
         Dispatchers.setMain(testDispatcher)
         every { contactRepository.observeContacts() } returns contactsFlow
         every { transportManager.onlinePeers } returns onlinePeersFlow
+        coEvery { contactRepository.addContactIfNotExists(any()) } returns Result.success(Unit)
     }
 
     @After
@@ -64,7 +65,7 @@ class ContactsViewModelTest {
         viewModel.handleIntent(ContactsUiIntent.AddContact("Dave", "FP_DAVE", "192.168.1.100:9090"))
         testScheduler.advanceUntilIdle()
 
-        coVerify { contactRepository.addContact(match { 
+        coVerify { contactRepository.addContactIfNotExists(match { 
             it.name == "Dave" && it.publicKeyFingerprint == "FP_DAVE" && it.onionAddress == "192.168.1.100:9090"
         }) }
     }
@@ -103,7 +104,7 @@ class ContactsViewModelTest {
         viewModel.handleIntent(ContactsUiIntent.ProcessScannedQR(qrContent))
         testScheduler.advanceUntilIdle()
 
-        coVerify { contactRepository.addContact(any()) }
+        coVerify { contactRepository.addContactIfNotExists(any()) }
         assertEquals("Successfully verified and added contact.", viewModel.state.value.lastScanResultMessage)
         assertNull(viewModel.state.value.error)
     }
@@ -118,8 +119,42 @@ class ContactsViewModelTest {
         viewModel.handleIntent(ContactsUiIntent.ProcessScannedQR(qrContent))
         testScheduler.advanceUntilIdle()
 
-        coVerify(exactly = 0) { contactRepository.addContact(any()) }
+        coVerify(exactly = 0) { contactRepository.addContactIfNotExists(any()) }
         assertTrue(viewModel.state.value.error is ContactsError.QrVerificationFailed)
         assertNull(viewModel.state.value.lastScanResultMessage)
+    }
+
+    @Test
+    fun processScannedQR_duplicate_setsAlreadyExistsError() = runTest(testDispatcher) {
+        val viewModel = ContactsViewModel(contactRepository, cryptoManager, transportManager)
+        val qrContent = "QC-IDENTITY:FP_QR:DEV-MODE"
+        val verifiedData = VerifiedContactData("Device", "FP_QR")
+        every { cryptoManager.extractContactFromQR(qrContent) } returns verifiedData
+        coEvery { contactRepository.addContactIfNotExists(any()) } returns Result.failure(Exception("Already exists"))
+
+        viewModel.handleIntent(ContactsUiIntent.ProcessScannedQR(qrContent))
+        testScheduler.advanceUntilIdle()
+
+        coVerify { contactRepository.addContactIfNotExists(any()) }
+        assertTrue(viewModel.state.value.error is ContactsError.ContactAlreadyExists)
+        assertEquals("Ten kontakt już istnieje", (viewModel.state.value.error as ContactsError.ContactAlreadyExists).message)
+        assertNull(viewModel.state.value.lastScanResultMessage)
+    }
+
+    @Test
+    fun clearError_removesErrorFromState() = runTest(testDispatcher) {
+        val viewModel = ContactsViewModel(contactRepository, cryptoManager, transportManager)
+        every { cryptoManager.generateContactFingerprint() } returns "FP_NEW"
+        coEvery { contactRepository.addContactIfNotExists(any()) } returns Result.failure(Exception("Already exists"))
+
+        // Trigger error
+        viewModel.handleIntent(ContactsUiIntent.AddContact("Dave", "FP_DAVE", "192.168.1.100:9090"))
+        testScheduler.advanceUntilIdle()
+        assertNotNull(viewModel.state.value.error)
+
+        // Clear error
+        viewModel.handleIntent(ContactsUiIntent.ClearError)
+        testScheduler.advanceUntilIdle()
+        assertNull(viewModel.state.value.error)
     }
 }

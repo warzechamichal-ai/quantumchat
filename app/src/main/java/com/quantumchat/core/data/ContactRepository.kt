@@ -18,6 +18,12 @@ interface ContactRepository {
     suspend fun addContact(contact: Contact)
 
     /**
+     * Adds a contact only if another contact with the same fingerprint does not already exist.
+     * Returns a Result indicating success or failure.
+     */
+    suspend fun addContactIfNotExists(contact: Contact): Result<Unit>
+
+    /**
      * Deletes a contact.
      */
     suspend fun deleteContact(contact: Contact)

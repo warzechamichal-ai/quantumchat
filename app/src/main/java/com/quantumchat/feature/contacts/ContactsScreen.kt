@@ -18,6 +18,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.quantumchat.core.common.model.Contact
 import com.quantumchat.ui.theme.CyberTeal
 import com.quantumchat.ui.theme.ElectricViolet
+import kotlinx.coroutines.launch
 
 // Screen Composable
 @OptIn(ExperimentalMaterial3Api::class)
@@ -33,8 +34,22 @@ fun ContactsScreen(
     var contactToEdit by remember { mutableStateOf<Contact?>(null) }
     var contactToDelete by remember { mutableStateOf<Contact?>(null) }
 
+    val snackbarHostState = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
+
+    LaunchedEffect(state.error) {
+        val currentError = state.error
+        if (currentError is ContactsError.ContactAlreadyExists) {
+            viewModel.handleIntent(ContactsUiIntent.ClearError)
+            scope.launch {
+                snackbarHostState.showSnackbar(currentError.message)
+            }
+        }
+    }
+
     Box(modifier = Modifier.fillMaxSize()) {
         Scaffold(
+            snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
             topBar = {
                 TopAppBar(
                     title = { Text("QuantumChat Secure Contacts", fontWeight = FontWeight.Bold) },
@@ -102,32 +117,35 @@ fun ContactsScreen(
 
                 // Error feedback banner
                 state.error?.let { error ->
-                    val errorMessage = when (error) {
-                        is ContactsError.QrVerificationFailed -> {
-                            "⚠️ Błąd weryfikacji QR: ${error.message}. Upewnij się, że skanujesz poprawny kod QR tożsamości."
+                    if (error !is ContactsError.ContactAlreadyExists) {
+                        val errorMessage = when (error) {
+                            is ContactsError.QrVerificationFailed -> {
+                                "⚠️ Błąd weryfikacji QR: ${error.message}. Upewnij się, że skanujesz poprawny kod QR tożsamości."
+                            }
+                            is ContactsError.DatabaseSaveFailed -> {
+                                "💾 Błąd bazy danych: Nie można zapisać kontaktu. Szczegóły: ${error.message}."
+                            }
+                            is ContactsError.LoadFailed -> {
+                                "❌ Błąd wczytywania: Nie udało się pobrać listy kontaktów: ${error.message}."
+                            }
+                            is ContactsError.ContactAlreadyExists -> ""
                         }
-                        is ContactsError.DatabaseSaveFailed -> {
-                            "💾 Błąd bazy danych: Nie można zapisać kontaktu. Szczegóły: ${error.message}."
-                        }
-                        is ContactsError.LoadFailed -> {
-                            "❌ Błąd wczytywania: Nie udało się pobrać listy kontaktów: ${error.message}."
-                        }
-                    }
 
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
-                        shape = RoundedCornerShape(8.dp),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(bottom = 16.dp)
-                    ) {
-                        Text(
-                            text = errorMessage,
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onErrorContainer,
-                            modifier = Modifier.padding(12.dp)
-                        )
+                        Card(
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(bottom = 16.dp)
+                        ) {
+                            Text(
+                                text = errorMessage,
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onErrorContainer,
+                                modifier = Modifier.padding(12.dp)
+                            )
+                        }
                     }
                 }
 

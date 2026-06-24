@@ -8,6 +8,8 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import javax.inject.Inject
 
+import timber.log.Timber
+
 /**
  * Concrete implementation of [ContactRepository] interacting with Room local DB.
  */
@@ -23,6 +25,18 @@ class ContactRepositoryImpl @Inject constructor(
 
     override suspend fun addContact(contact: Contact) {
         contactDao.insertContact(contact.toEntity())
+    }
+
+    override suspend fun addContactIfNotExists(contact: Contact): Result<Unit> {
+        val fingerprint = contact.publicKeyFingerprint
+        val existing = contactDao.getContactByFingerprint(fingerprint)
+        return if (existing != null) {
+            Timber.w("Contact with fingerprint $fingerprint already exists, skipping")
+            Result.failure(Exception("Contact with fingerprint $fingerprint already exists"))
+        } else {
+            contactDao.insertContact(contact.toEntity())
+            Result.success(Unit)
+        }
     }
 
     override suspend fun deleteContact(contact: Contact) {
