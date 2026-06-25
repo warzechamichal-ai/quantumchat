@@ -48,7 +48,8 @@ data class ChatUiState(
     val connectionActive: Boolean = false,
     val inputText: String = "",
     val discoveredDevices: List<DiscoveredDevice> = emptyList(),
-    val isScanningManually: Boolean = false
+    val isScanningManually: Boolean = false,
+    val isSessionReady: Boolean = false
 )
 
 // MVI Intent
@@ -149,18 +150,25 @@ class ChatViewModel @Inject constructor(
                         val targetAddress = contact.onionAddress ?: fingerprint
                         val isIp = contact.onionAddress != null && contact.onionAddress.matches(Regex("""^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+)?$"""))
 
+                        var sessionReady = false
                         if (!isIp) {
                             timber.log.Timber.i("ChatViewModel: Attempting to establish secure PQ hybrid session for contact '${contact.name}' (fingerprint: $fingerprint)")
                             try {
-                                cryptoManager.establishSecureSession(fingerprint)
-                                timber.log.Timber.i("ChatViewModel: Secure PQ session established successfully for fingerprint: $fingerprint")
+                                val success = cryptoManager.establishSecureSession(fingerprint)
+                                if (success) {
+                                    timber.log.Timber.i("ChatViewModel: Secure PQ session established successfully for fingerprint: $fingerprint")
+                                    sessionReady = true
+                                } else {
+                                    timber.log.Timber.e("ChatViewModel: establishSecureSession returned false for non-IP fingerprint: $fingerprint")
+                                }
                             } catch (e: Exception) {
                                 timber.log.Timber.e(e, "ChatViewModel: Failed to establish secure PQ session for fingerprint: $fingerprint")
                             }
                         }
 
                         _state.value = _state.value.copy(
-                            contact = contact
+                            contact = contact,
+                            isSessionReady = sessionReady
                         )
 
                         // Observe messages from database reactively
@@ -209,11 +217,21 @@ class ChatViewModel @Inject constructor(
                         if (isIp && connected) {
                             timber.log.Timber.i("ChatViewModel: TCP Connection successful. Now establishing secure PQ session for fingerprint: $fingerprint")
                             try {
-                                cryptoManager.establishSecureSession(fingerprint, isNewSession = true)
-                                timber.log.Timber.i("ChatViewModel: Secure PQ session established successfully for fingerprint: $fingerprint")
+                                val success = cryptoManager.establishSecureSession(fingerprint, isNewSession = true)
+                                if (success) {
+                                    timber.log.Timber.i("ChatViewModel: Secure PQ session established successfully for fingerprint: $fingerprint")
+                                    _state.value = _state.value.copy(isSessionReady = true)
+                                } else {
+                                    timber.log.Timber.e("ChatViewModel: establishSecureSession returned false for IP fingerprint: $fingerprint")
+                                    _state.value = _state.value.copy(isSessionReady = false)
+                                }
                             } catch (e: Exception) {
                                 timber.log.Timber.e(e, "ChatViewModel: Failed to establish secure PQ session for fingerprint: $fingerprint")
+                                _state.value = _state.value.copy(isSessionReady = false)
                             }
+                        } else if (isIp) {
+                            timber.log.Timber.w("ChatViewModel: TCP Connection failed for IP contact. Session is not ready.")
+                            _state.value = _state.value.copy(isSessionReady = false)
                         }
 
                         val isOnline = connected || transportManager.onlinePeers.first().contains(fingerprint)
@@ -223,6 +241,10 @@ class ChatViewModel @Inject constructor(
                     }
                 }
                 is ChatUiIntent.SendTextMessage -> {
+                    if (!_state.value.isSessionReady) {
+                        timber.log.Timber.w("ChatViewModel: Cannot send message, cryptographic session is not ready.")
+                        return@launch
+                    }
                     val text = intent.content.trim()
                     timber.log.Timber.d("ChatViewModel: Processing SendTextMessage intent. Text length: ${text.length} characters")
                     if (text.isEmpty()) {
@@ -418,6 +440,7 @@ fun ChatScreen(
                 Spacer(modifier = Modifier.width(8.dp))
                 Button(
                     onClick = { viewModel.handleIntent(ChatUiIntent.SendTextMessage(state.inputText)) },
+                    enabled = state.isSessionReady,
                     shape = RoundedCornerShape(24.dp),
                     colors = ButtonDefaults.buttonColors(
                         containerColor = MaterialTheme.colorScheme.primary

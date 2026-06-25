@@ -219,7 +219,16 @@ class CryptoManagerImpl @Inject constructor(
 
 
             val isInitiator = getLocalIdentityFingerprint() < contactFingerprint
-            val kpg = KeyPairGenerator.getInstance("XDH", "BC").apply { initialize(255) }
+            
+            // Seed the generator deterministically in fallback mode to avoid out-of-sync keypairs
+            val kpg = if (isFallback) {
+                val seedDigest = digest.digest(getFallbackSeedBytes(contactFingerprint))
+                val deterministicRandom = java.security.SecureRandom.getInstance("SHA1PRNG")
+                deterministicRandom.setSeed(seedDigest)
+                KeyPairGenerator.getInstance("XDH", "BC").apply { initialize(255, deterministicRandom) }
+            } else {
+                KeyPairGenerator.getInstance("XDH", "BC").apply { initialize(255) }
+            }
 
             val state = if (isInitiator) {
                 // Alice is initiator:
@@ -683,15 +692,16 @@ class CryptoManagerImpl @Inject constructor(
 
     override fun deleteSession(contactFingerprint: String): Boolean {
         return try {
-            Timber.i("Deleting ratchet state and skipped keys for fingerprint: $contactFingerprint")
+            Timber.i("deleteSession: Evicting in-memory ratchetStates cache and database records for fingerprint: $contactFingerprint")
             ratchetStates.remove(contactFingerprint)
             runBlocking {
                 ratchetStateDao.deleteRatchetState(contactFingerprint)
                 skippedMessageKeyDao.deleteSkippedMessageKeysForContact(contactFingerprint)
             }
+            Timber.d("deleteSession: Successfully deleted session state and skipped keys from database for fingerprint: $contactFingerprint")
             true
         } catch (e: Exception) {
-            Timber.e(e, "Failed to delete session state for fingerprint: $contactFingerprint")
+            Timber.e(e, "deleteSession: Failed to delete session state for fingerprint: $contactFingerprint")
             false
         }
     }

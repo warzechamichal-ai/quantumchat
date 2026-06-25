@@ -32,6 +32,10 @@ class LocalNetworkTransport @Inject constructor(
     override val isConnected: Boolean
         get() = _isConnected.get()
 
+    private val _handshakeCompleted = AtomicBoolean(false)
+    val handshakeCompleted: Boolean
+        get() = _handshakeCompleted.get()
+
     private val _incoming = MutableSharedFlow<ByteArray>(extraBufferCapacity = 64)
     private var serverSocket: ServerSocket? = null
     private var outgoingSocket: Socket? = null
@@ -101,13 +105,21 @@ class LocalNetworkTransport @Inject constructor(
                             }
                             Timber.i("LocalNetworkTransport Handshake (Incoming): Local fingerprint sent.")
 
-                            // 3. Establish secure session
-                            val isInitiator = localFingerprint < remoteFingerprint
-                            val role = if (isInitiator) "Alice (Initiator)" else "Bob (Responder)"
-                            Timber.i("LocalNetworkTransport Handshake (Incoming): Role determined as: $role")
+                            // Ustaw flagę na true po pomyślnym handshake'u
+                            _handshakeCompleted.set(true)
+                            Timber.i("LocalNetworkTransport Handshake (Incoming): Handshake completed successfully.")
 
-                            val sessionEstablished = cryptoManager.establishSecureSession(remoteFingerprint, isNewSession = true)
-                            Timber.i("LocalNetworkTransport Handshake (Incoming): Session establishment status: $sessionEstablished")
+                            // 3. Establish secure session
+                            if (_handshakeCompleted.get()) {
+                                val isInitiator = localFingerprint < remoteFingerprint
+                                val role = if (isInitiator) "Alice (Initiator)" else "Bob (Responder)"
+                                Timber.i("LocalNetworkTransport Handshake (Incoming): Role determined as: $role")
+
+                                val sessionEstablished = cryptoManager.establishSecureSession(remoteFingerprint, isNewSession = true)
+                                Timber.i("LocalNetworkTransport Handshake (Incoming): Session establishment status: $sessionEstablished")
+                            } else {
+                                Timber.e("LocalNetworkTransport Handshake (Incoming): Handshake flag is false, skipping session establishment.")
+                            }
 
                             // 4. Handle incoming messages
                             handleIncomingClient(socket)
@@ -232,13 +244,21 @@ class LocalNetworkTransport @Inject constructor(
                 val remoteFingerprint = String(remoteBytes, Charsets.UTF_8)
                 Timber.i("LocalNetworkTransport Handshake (Outgoing): Received remote fingerprint: $remoteFingerprint")
 
+                // Ustaw flagę na true po pomyślnym handshake'u
+                _handshakeCompleted.set(true)
+                Timber.i("LocalNetworkTransport Handshake (Outgoing): Handshake completed successfully.")
+
                 // 3. Establish secure session
-                val isInitiator = localFingerprint < remoteFingerprint
-                val role = if (isInitiator) "Alice (Initiator)" else "Bob (Responder)"
-                Timber.i("LocalNetworkTransport Handshake (Outgoing): Role determined as: $role")
-                
-                val sessionEstablished = cryptoManager.establishSecureSession(remoteFingerprint, isNewSession = true)
-                Timber.i("LocalNetworkTransport Handshake (Outgoing): Session establishment status: $sessionEstablished")
+                if (_handshakeCompleted.get()) {
+                    val isInitiator = localFingerprint < remoteFingerprint
+                    val role = if (isInitiator) "Alice (Initiator)" else "Bob (Responder)"
+                    Timber.i("LocalNetworkTransport Handshake (Outgoing): Role determined as: $role")
+                    
+                    val sessionEstablished = cryptoManager.establishSecureSession(remoteFingerprint, isNewSession = true)
+                    Timber.i("LocalNetworkTransport Handshake (Outgoing): Session establishment status: $sessionEstablished")
+                } else {
+                    Timber.e("LocalNetworkTransport Handshake (Outgoing): Handshake flag is false, skipping session establishment.")
+                }
 
                 outgoingSocket = socket
                 _isConnected.set(true)
@@ -284,6 +304,7 @@ class LocalNetworkTransport @Inject constructor(
 
     override suspend fun disconnect() {
         withContext(Dispatchers.IO) {
+            _handshakeCompleted.set(false)
             val socket = outgoingSocket
             if (socket != null) {
                 Timber.d("LocalNetworkTransport: Disconnecting outgoing socket: remote=${socket.remoteSocketAddress}")
