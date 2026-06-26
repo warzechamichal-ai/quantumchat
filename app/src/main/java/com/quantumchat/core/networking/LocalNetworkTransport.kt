@@ -141,8 +141,10 @@ class LocalNetworkTransport @Inject constructor(
                             // 3. Establish secure session
                             if (_handshakeCompleted.get()) {
                                 val isInitiator = localFingerprint < remoteFingerprint
-                                val role = if (isInitiator) "Alice (Initiator)" else "Bob (Responder)"
-                                Timber.i("LocalNetworkTransport Handshake (Incoming): Role determined as: $role")
+                                val role = if (isInitiator) "Initiator" else "Responder"
+                                // Comment: Role is strictly determined lexicographically by comparing fingerprints
+                                // to guarantee Bob and Alice agree on who is the Initiator and Responder.
+                                Timber.i("Role determined as: $role | local=$localFingerprint, remote=$remoteFingerprint")
 
                                 val sessionEstablished = cryptoManager.establishSecureSession(remoteFingerprint, isNewSession = true)
                                 Timber.i("LocalNetworkTransport Handshake (Incoming): Session establishment status: $sessionEstablished")
@@ -309,8 +311,10 @@ class LocalNetworkTransport @Inject constructor(
                 // 3. Establish secure session
                 if (_handshakeCompleted.get()) {
                     val isInitiator = localFingerprint < remoteFingerprint
-                    val role = if (isInitiator) "Alice (Initiator)" else "Bob (Responder)"
-                    Timber.i("LocalNetworkTransport Handshake (Outgoing): Role determined as: $role")
+                    val role = if (isInitiator) "Initiator" else "Responder"
+                    // Comment: Role is strictly determined lexicographically by comparing fingerprints
+                    // to guarantee Bob and Alice agree on who is the Initiator and Responder.
+                    Timber.i("Role determined as: $role | local=$localFingerprint, remote=$remoteFingerprint")
                     
                     val sessionEstablished = cryptoManager.establishSecureSession(remoteFingerprint, isNewSession = true)
                     Timber.i("LocalNetworkTransport Handshake (Outgoing): Session establishment status: $sessionEstablished")

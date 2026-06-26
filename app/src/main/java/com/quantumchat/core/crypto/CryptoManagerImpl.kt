@@ -324,12 +324,12 @@ class CryptoManagerImpl @Inject constructor(
             // Save new state to DB
             saveRatchetStateToDb(contactFingerprint, state)
             
-            // Version 3.12: Detailed diagnostics logging of derived keys hashes
+            // Version 3.13: Precise diagnostics logging of keys hashes and counters
             val rootKeyHash = digest.digest(state.rootKey).take(8).joinToString("") { "%02x".format(it) }
-            val sendingCKHash = digest.digest(state.sendingChainKey).take(8).joinToString("") { "%02x".format(it) }
-            val receivingCKHash = digest.digest(state.receivingChainKey).take(8).joinToString("") { "%02x".format(it) }
-            Timber.i("Ratchet state initialized ($role) and saved to database for fingerprint: $contactFingerprint. " +
-                     "Diagnostics: rootKey hash=$rootKeyHash, sendingChainKey hash=$sendingCKHash, receivingChainKey hash=$receivingCKHash")
+            val sendingHash = digest.digest(state.sendingChainKey).take(8).joinToString("") { "%02x".format(it) }
+            val receivingHash = digest.digest(state.receivingChainKey).take(8).joinToString("") { "%02x".format(it) }
+            val resolvedRole = if (isInitiator) "Initiator" else "Responder"
+            Timber.i("Ratchet state initialized ($resolvedRole). rootKey=${rootKeyHash}, sendingCK=${sendingHash}, receivingCK=${receivingHash}, N=${state.sendingMessageNumber}, PN=${state.receivingMessageNumber}")
             true
         } catch (e: Exception) {
             Timber.e(e, "Failed to establish secure session.")
@@ -460,12 +460,24 @@ class CryptoManagerImpl @Inject constructor(
             ratchetStates[contactId] ?: return ByteArray(0)
         }
 
+        val initialReceivingN = ratchet.receivingMessageNumber
+
         try {
             val plainBytes = decryptMessageWithState(cipherText, contactId, ratchet)
             // Success! Reset decryption failure count.
             decryptionFailureCounts[contactId] = 0
             return plainBytes
         } catch (e: Exception) {
+            // Version 3.13 check: If decryption fails on the very first or second message (N=0 or 1),
+            // immediately reset the Double Ratchet session using isNewSession = true to synchronize.
+            if (initialReceivingN == 0 || initialReceivingN == 1) {
+                Timber.w(e, "CryptoManagerImpl: BAD_DECRYPT at first messages (N=$initialReceivingN). Forcing immediate session reset (isNewSession = true)...")
+                decryptionFailureCounts[contactId] = 0 // reset counter
+                ratchetStates.remove(contactId) // remove corrupted cached state
+                establishSecureSession(contactId, isNewSession = true) // reset session
+                return ByteArray(0)
+            }
+
             Timber.w(e, "CryptoManagerImpl: First decryption attempt failed for $contactId. Reloading state from DB and retrying...")
             
             // Reload the state from database to discard any in-memory mutations
@@ -547,6 +559,11 @@ class CryptoManagerImpl @Inject constructor(
         // 1. Check for skipped keys first
         val skippedKeyEntity = runBlocking {
             skippedMessageKeyDao.getSkippedMessageKey(contactId, dhPublicKeyB64, n)
+        }
+        
+        // Version 3.13 check: verify message is not too old or duplicate
+        if (n < ratchet.receivingMessageNumber && skippedKeyEntity == null) {
+            throw IllegalArgumentException("Message is too old or duplicate: n=$n, expected >= ${ratchet.receivingMessageNumber}")
         }
         
         val mk = if (skippedKeyEntity != null) {
