@@ -66,19 +66,47 @@ class LocalNetworkTransport @Inject constructor(
                         try {
                             Timber.i("LocalNetworkTransport Handshake (Incoming): Initiating handshake for client ${socket.remoteSocketAddress}...")
                             
-                            // 1. Read remote fingerprint
+                            // 1. Read remote fingerprint length with retry logic and 5s read timeout
+                            socket.soTimeout = 5000
                             val inputStream = socket.getInputStream()
                             val lenBytes = ByteArray(4)
-                            var readBytes = 0
-                            while (readBytes < 4) {
-                                val read = withContext(Dispatchers.IO) {
-                                    inputStream.read(lenBytes, readBytes, 4 - readBytes)
+                            var length = -1
+                            var attempts = 0
+                            val maxAttempts = 2
+                            var lastException: Exception? = null
+
+                            while (attempts < maxAttempts) {
+                                attempts++
+                                try {
+                                    var readBytes = 0
+                                    // Reset lenBytes
+                                    for (i in 0 until 4) lenBytes[i] = 0
+                                    while (readBytes < 4) {
+                                        val read = withContext(Dispatchers.IO) {
+                                            inputStream.read(lenBytes, readBytes, 4 - readBytes)
+                                        }
+                                        if (read == -1) throw IOException("EOF reading remote fingerprint length")
+                                        readBytes += read
+                                    }
+                                    val parsedLength = ByteBuffer.wrap(lenBytes).int
+                                    if (parsedLength <= 0 || parsedLength > 1024) {
+                                        throw IOException("Invalid remote fingerprint length: $parsedLength")
+                                    }
+                                    length = parsedLength
+                                    break // Success!
+                                } catch (e: Exception) {
+                                    lastException = e
+                                    Timber.w("LocalNetworkTransport Handshake (Incoming): Attempt $attempts failed to read length: ${e.message}")
+                                    if (attempts < maxAttempts) {
+                                        delay(200)
+                                    }
                                 }
-                                if (read == -1) throw IOException("Handshake failed: EOF reading remote fingerprint length")
-                                readBytes += read
                             }
-                            val length = ByteBuffer.wrap(lenBytes).int
-                            if (length <= 0 || length > 1024) throw IOException("Handshake failed: invalid remote fingerprint length: $length")
+
+                            if (length == -1) {
+                                delay(500)
+                                throw IOException("Handshake failed after $maxAttempts attempts to read fingerprint length", lastException)
+                            }
                             
                             val remoteBytes = ByteArray(length)
                             var readPayload = 0
@@ -107,6 +135,7 @@ class LocalNetworkTransport @Inject constructor(
 
                             // Ustaw flagę na true po pomyślnym handshake'u
                             _handshakeCompleted.set(true)
+                            socket.soTimeout = 0 // Reset timeout to infinite after handshake completes
                             Timber.i("LocalNetworkTransport Handshake (Incoming): Handshake completed successfully.")
 
                             // 3. Establish secure session
@@ -124,7 +153,7 @@ class LocalNetworkTransport @Inject constructor(
                             // 4. Handle incoming messages
                             handleIncomingClient(socket)
                         } catch (e: Exception) {
-                            Timber.e(e, "LocalNetworkTransport Handshake (Incoming): Failed for client ${socket.remoteSocketAddress}")
+                            Timber.w(e, "LocalNetworkTransport Handshake (Incoming): Failed for client ${socket.remoteSocketAddress}")
                             try { socket.close() } catch (ex: Exception) {}
                         }
                     }
@@ -222,17 +251,45 @@ class LocalNetworkTransport @Inject constructor(
                 outputStream.flush()
                 Timber.i("LocalNetworkTransport Handshake (Outgoing): Local fingerprint sent. Reading remote fingerprint...")
 
-                // 2. Read remote fingerprint
+                // 2. Read remote fingerprint length with retry logic and 5s read timeout
+                socket.soTimeout = 5000
                 val inputStream = socket.getInputStream()
                 val lenBytes = ByteArray(4)
-                var readBytes = 0
-                while (readBytes < 4) {
-                    val read = inputStream.read(lenBytes, readBytes, 4 - readBytes)
-                    if (read == -1) throw IOException("Handshake failed: EOF reading fingerprint length")
-                    readBytes += read
+                var length = -1
+                var attempts = 0
+                val maxAttempts = 2
+                var lastException: Exception? = null
+
+                while (attempts < maxAttempts) {
+                    attempts++
+                    try {
+                        var readBytes = 0
+                        // Reset lenBytes
+                        for (i in 0 until 4) lenBytes[i] = 0
+                        while (readBytes < 4) {
+                            val read = inputStream.read(lenBytes, readBytes, 4 - readBytes)
+                            if (read == -1) throw IOException("EOF reading remote fingerprint length")
+                            readBytes += read
+                        }
+                        val parsedLength = ByteBuffer.wrap(lenBytes).int
+                        if (parsedLength <= 0 || parsedLength > 1024) {
+                            throw IOException("Invalid remote fingerprint length: $parsedLength")
+                        }
+                        length = parsedLength
+                        break // Success!
+                    } catch (e: Exception) {
+                        lastException = e
+                        Timber.w("LocalNetworkTransport Handshake (Outgoing): Attempt $attempts failed to read length: ${e.message}")
+                        if (attempts < maxAttempts) {
+                            delay(200)
+                        }
+                    }
                 }
-                val length = ByteBuffer.wrap(lenBytes).int
-                if (length <= 0 || length > 1024) throw IOException("Handshake failed: invalid remote fingerprint length: $length")
+
+                if (length == -1) {
+                    delay(500)
+                    throw IOException("Handshake failed after $maxAttempts attempts to read fingerprint length", lastException)
+                }
                 
                 val remoteBytes = ByteArray(length)
                 var readPayload = 0
@@ -246,6 +303,7 @@ class LocalNetworkTransport @Inject constructor(
 
                 // Ustaw flagę na true po pomyślnym handshake'u
                 _handshakeCompleted.set(true)
+                socket.soTimeout = 0 // Reset timeout to infinite after handshake completes
                 Timber.i("LocalNetworkTransport Handshake (Outgoing): Handshake completed successfully.")
 
                 // 3. Establish secure session
@@ -265,7 +323,7 @@ class LocalNetworkTransport @Inject constructor(
                 Timber.i("LocalNetworkTransport: Outgoing connection to $host:$port successfully established. Local address: ${socket.localSocketAddress}")
                 true
             } catch (e: Exception) {
-                Timber.w(e, "LocalNetworkTransport: Failed to connect to target '$target': ${e.message}")
+                Timber.w(e, "LocalNetworkTransport Handshake (Outgoing): Failed to connect to target '$target': ${e.message}")
                 _isConnected.set(false)
                 false
             }

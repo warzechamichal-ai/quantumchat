@@ -129,6 +129,15 @@ class ChatViewModel @Inject constructor(
                     // Turn discovery ON to find local devices only if not already connected
                     transportManager.startDiscovery()
                 }
+
+                // Dynamically update isSessionReady based on the cryptographic state
+                if (fingerprint != null) {
+                    val sessionReady = cryptoManager.isSessionReady(fingerprint)
+                    if (_state.value.isSessionReady != sessionReady) {
+                        _state.value = _state.value.copy(isSessionReady = sessionReady)
+                    }
+                }
+
                 delay(5000) // Poll and check connection/discovery state every 5 seconds
             }
         }
@@ -419,34 +428,50 @@ fun ChatScreen(
                 }
             }
 
-            // Input Bar
-            Row(
+            // Input Bar Section
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp),
-                verticalAlignment = Alignment.CenterVertically
+                horizontalAlignment = Alignment.Start
             ) {
-                OutlinedTextField(
-                    value = state.inputText,
-                    onValueChange = { viewModel.handleIntent(ChatUiIntent.UpdateInputText(it)) },
-                    placeholder = { Text("Secure message...", color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.5f)) },
-                    modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(24.dp),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = MaterialTheme.colorScheme.primary,
-                        unfocusedBorderColor = MaterialTheme.colorScheme.surface
-                    )
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Button(
-                    onClick = { viewModel.handleIntent(ChatUiIntent.SendTextMessage(state.inputText)) },
-                    enabled = state.isSessionReady,
-                    shape = RoundedCornerShape(24.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.primary
-                    )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("🔒 Send", color = MaterialTheme.colorScheme.onPrimary)
+                    OutlinedTextField(
+                        value = state.inputText,
+                        onValueChange = { viewModel.handleIntent(ChatUiIntent.UpdateInputText(it)) },
+                        placeholder = { Text("Secure message...", color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.5f)) },
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(24.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = MaterialTheme.colorScheme.primary,
+                            unfocusedBorderColor = MaterialTheme.colorScheme.surface
+                        )
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Button(
+                        onClick = { viewModel.handleIntent(ChatUiIntent.SendTextMessage(state.inputText)) },
+                        enabled = state.isSessionReady,
+                        shape = RoundedCornerShape(24.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.primary,
+                            disabledContainerColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f),
+                            disabledContentColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+                        )
+                    ) {
+                        Text("🔒 Send", color = if (state.isSessionReady) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f))
+                    }
+                }
+                if (!state.isSessionReady) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "Nawiązywanie bezpiecznego połączenia...",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(start = 12.dp)
+                    )
                 }
             }
         }

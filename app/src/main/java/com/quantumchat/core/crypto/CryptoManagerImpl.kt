@@ -67,6 +67,9 @@ class CryptoManagerImpl @Inject constructor(
     private var localKyberKeyPair: org.bouncycastle.crypto.AsymmetricCipherKeyPair? = null
     private val contactKyberPublicKeys = mutableMapOf<String, KyberPublicKeyParameters>()
 
+    // Tracking decryption failures count per contact/session
+    private val decryptionFailureCounts = java.util.concurrent.ConcurrentHashMap<String, Int>()
+
     init {
         val provider = Security.getProvider("BC")
         if (provider == null || provider.javaClass.name != "org.bouncycastle.jce.provider.BouncyCastleProvider") {
@@ -218,8 +221,6 @@ class CryptoManagerImpl @Inject constructor(
             val (rootKey, kyberCiphertext) = performHybridKeyAgreement(x25519SharedSecret, contactFingerprint)
 
 
-            val isInitiator = getLocalIdentityFingerprint() < contactFingerprint
-            
             // Seed the generator deterministically in fallback mode to avoid out-of-sync keypairs
             val kpg = if (isFallback) {
                 val seedDigest = digest.digest(getFallbackSeedBytes(contactFingerprint))
@@ -229,6 +230,9 @@ class CryptoManagerImpl @Inject constructor(
             } else {
                 KeyPairGenerator.getInstance("XDH", "BC").apply { initialize(255) }
             }
+
+            val isInitiator = getLocalIdentityFingerprint() < contactFingerprint
+            val role = if (isInitiator) "Alice (Initiator)" else "Bob (Responder)"
 
             val state = if (isInitiator) {
                 // Alice is initiator:
@@ -244,10 +248,17 @@ class CryptoManagerImpl @Inject constructor(
                 val sharedSecret = calculateDH(aliceDhs.private, initialRemotePub, isFallback, contactFingerprint)
                 val (rootKeyNew, sendingCK) = kdfRk(rootKey, sharedSecret)
                 
+                // Under fallback, Alice also derives receiving CK deterministically
+                val receivingCK = if (isFallback) {
+                    hmacSha256(rootKey, sharedSecret + byteArrayOf(3))
+                } else {
+                    ByteArray(32)
+                }
+
                 RatchetState(
                     rootKey = rootKeyNew,
                     sendingChainKey = sendingCK,
-                    receivingChainKey = ByteArray(32),
+                    receivingChainKey = receivingCK,
                     sendingMessageNumber = 0,
                     receivingMessageNumber = 0,
                     previousChainLength = 0,
@@ -266,19 +277,41 @@ class CryptoManagerImpl @Inject constructor(
                     kpg.generateKeyPair().public
                 }
                 
-                // Bob does not derive sendingChainKey yet (done when Bob receives message & ratchets)
-                RatchetState(
-                    rootKey = rootKey,
-                    sendingChainKey = ByteArray(32),
-                    receivingChainKey = ByteArray(32),
-                    sendingMessageNumber = 0,
-                    receivingMessageNumber = 0,
-                    previousChainLength = 0,
-                    localDhKeyPair = bobDhs,
-                    remoteDhPublicKey = initialRemotePub,
-                    isFallback = isFallback,
-                    pendingKyberCiphertext = null
-                )
+                if (isFallback) {
+                    // Bob responder fallback mode: perform full deterministic initialization
+                    Timber.d("establishSecureSession: Bob (Responder) fallback mode - performing full initialization")
+                    val sharedSecret = calculateDH(bobDhs.private, initialRemotePub, isFallback, contactFingerprint)
+                    val rootKeyNew = hmacSha256(rootKey, sharedSecret + byteArrayOf(1))
+                    val receivingCK = hmacSha256(rootKey, sharedSecret + byteArrayOf(2))
+                    val sendingCK = hmacSha256(rootKey, sharedSecret + byteArrayOf(3))
+                    
+                    RatchetState(
+                        rootKey = rootKeyNew,
+                        sendingChainKey = sendingCK,
+                        receivingChainKey = receivingCK,
+                        sendingMessageNumber = 0,
+                        receivingMessageNumber = 0,
+                        previousChainLength = 0,
+                        localDhKeyPair = bobDhs,
+                        remoteDhPublicKey = initialRemotePub,
+                        isFallback = isFallback,
+                        pendingKyberCiphertext = null
+                    )
+                } else {
+                    // Bob does not derive sendingChainKey yet (done when Bob receives message & ratchets)
+                    RatchetState(
+                        rootKey = rootKey,
+                        sendingChainKey = ByteArray(32),
+                        receivingChainKey = ByteArray(32),
+                        sendingMessageNumber = 0,
+                        receivingMessageNumber = 0,
+                        previousChainLength = 0,
+                        localDhKeyPair = bobDhs,
+                        remoteDhPublicKey = initialRemotePub,
+                        isFallback = isFallback,
+                        pendingKyberCiphertext = null
+                    )
+                }
             }
 
             ratchetStates[contactFingerprint] = state
@@ -286,7 +319,7 @@ class CryptoManagerImpl @Inject constructor(
             // Save new state to DB
             saveRatchetStateToDb(contactFingerprint, state)
             val rootKeyHash = digest.digest(state.rootKey).take(8).joinToString("") { "%02x".format(it) }
-            Timber.i("Ratchet state initialized and saved to database for fingerprint: $contactFingerprint. rootKey hash: $rootKeyHash")
+            Timber.i("Ratchet state initialized ($role) and saved to database for fingerprint: $contactFingerprint. rootKey hash: $rootKeyHash")
             true
         } catch (e: Exception) {
             Timber.e(e, "Failed to establish secure session.")
@@ -417,163 +450,203 @@ class CryptoManagerImpl @Inject constructor(
             ratchetStates[contactId] ?: return ByteArray(0)
         }
 
-        return try {
-            // Unpack Kyber Ciphertext Length (2 bytes)
-            val kyberLen = ((cipherText[0].toInt() and 0xFF) shl 8) or (cipherText[1].toInt() and 0xFF)
-            var offset = 2
-
-            val kyberCiphertextBytes = if (kyberLen > 0) {
-                val bytes = cipherText.copyOfRange(offset, offset + kyberLen)
-                offset += kyberLen
-                bytes
-            } else null
-
-            // Unpack DH Pub Key
-            val dhPubLen = cipherText[offset].toInt() and 0xFF
-            val dhPubBytes = cipherText.copyOfRange(offset + 1, offset + 1 + dhPubLen)
-            offset += 1 + dhPubLen
-
-            // Unpack N, PN, IV
-            val n = unpackInt(cipherText, offset)
-            val pn = unpackInt(cipherText, offset + 4)
-            val iv = cipherText.copyOfRange(offset + 8, offset + 8 + 12)
-            offset += 8 + 12
-
-            val encryptedBytes = cipherText.copyOfRange(offset, cipherText.size)
-
-            val dhPublicKeyB64 = java.util.Base64.getEncoder().encodeToString(dhPubBytes)
-
-            // If we have an incoming Kyber ciphertext and we are the receiver, decapsulate it to derive the real root key
-            if (kyberCiphertextBytes != null) {
-                val isInitiator = getLocalIdentityFingerprint() < contactId
-                if (!isInitiator) {
-                    val recipientPublicKey = contactPublicKeys[contactId]
-                    val localKP = localKeyPair
-                    val isFallback = recipientPublicKey == null || localKP == null
-                    val digest = MessageDigest.getInstance("SHA-256")
-
-                    // Classical key agreement (X25519)
-                    val x25519SharedSecret = if (!isFallback) {
-                        val ka = KeyAgreement.getInstance("X25519", "BC")
-                        ka.init(localKP!!.private)
-                        ka.doPhase(recipientPublicKey!!, true)
-                        ka.generateSecret()
-                    } else {
-                        digest.digest(getFallbackSeedBytes(contactId))
-                    }
-
-                    // Decapsulate using our private Kyber key and derive the real rootKey
-                    val (realRootKey, _) = performHybridKeyAgreement(x25519SharedSecret, contactId, kyberCiphertextBytes)
-                    
-                    // Update Bob's ratchet state with the real hybrid root key
-                    ratchet.rootKey = realRootKey
-                    Timber.i("Bob decapsulated Kyber ciphertext and initialized hybrid rootKey.")
-                }
-            }
-
-            // 1. Check for skipped keys first
-            val skippedKeyEntity = runBlocking {
-                skippedMessageKeyDao.getSkippedMessageKey(contactId, dhPublicKeyB64, n)
-            }
+        try {
+            val plainBytes = decryptMessageWithState(cipherText, contactId, ratchet)
+            // Success! Reset decryption failure count.
+            decryptionFailureCounts[contactId] = 0
+            return plainBytes
+        } catch (e: Exception) {
+            Timber.w(e, "CryptoManagerImpl: First decryption attempt failed for $contactId. Reloading state from DB and retrying...")
             
-            val mk = if (skippedKeyEntity != null) {
-                Timber.i("Decrypting with skipped message key for msg number $n")
-                val key = skippedKeyEntity.messageKey
-                // Delete used skipped key for forward secrecy
-                runBlocking {
-                    skippedMessageKeyDao.deleteSkippedMessageKey(contactId, dhPublicKeyB64, n)
+            // Reload the state from database to discard any in-memory mutations
+            loadRatchetStateFromDb(contactId)
+            val reloadedRatchet = ratchetStates[contactId]
+            
+            if (reloadedRatchet != null) {
+                try {
+                    val plainBytes = decryptMessageWithState(cipherText, contactId, reloadedRatchet)
+                    // Success on retry! Reset decryption failure count.
+                    decryptionFailureCounts[contactId] = 0
+                    return plainBytes
+                } catch (retryEx: Exception) {
+                    Timber.e(retryEx, "CryptoManagerImpl: Second decryption attempt failed after reloading state from DB.")
+                    handleDecryptionFailure(contactId, retryEx)
                 }
-                key
             } else {
-                // 2. Perform DH ratchet step if public key has changed
-                val currentRemoteEncoded = ratchet.remoteDhPublicKey.encoded
-                val isNewKey = !dhPubBytes.contentEquals(currentRemoteEncoded)
+                Timber.e(e, "CryptoManagerImpl: Failed to reload state from DB after first decryption failure.")
+                handleDecryptionFailure(contactId, e)
+            }
+            return ByteArray(0)
+        }
+    }
 
-                if (isNewKey) {
-                    Timber.i("New DH key received. Performing DH ratchet update.")
-                    // Skip message keys in old receiving chain
-                    val remoteEncoded = ratchet.remoteDhPublicKey.encoded
-                    while (ratchet.receivingMessageNumber < pn) {
-                        val skippedMk = ratchet.deriveNextReceivingKey()
-                        saveSkippedKey(contactId, remoteEncoded, ratchet.receivingMessageNumber - 1, skippedMk)
-                    }
+    private fun decryptMessageWithState(cipherText: ByteArray, contactId: String, ratchet: RatchetState): ByteArray {
+        // Unpack Kyber Ciphertext Length (2 bytes)
+        val kyberLen = ((cipherText[0].toInt() and 0xFF) shl 8) or (cipherText[1].toInt() and 0xFF)
+        var offset = 2
 
-                    // Perform DH Ratchet Step
-                    ratchet.previousChainLength = ratchet.sendingMessageNumber
-                    ratchet.sendingMessageNumber = 0
-                    ratchet.receivingMessageNumber = 0
+        val kyberCiphertextBytes = if (kyberLen > 0) {
+            val bytes = cipherText.copyOfRange(offset, offset + kyberLen)
+            offset += kyberLen
+            bytes
+        } else null
 
-                    val kf = KeyFactory.getInstance("X25519", "BC")
-                    val spec = X509EncodedKeySpec(dhPubBytes)
-                    ratchet.remoteDhPublicKey = kf.generatePublic(spec)
+        // Unpack DH Pub Key
+        val dhPubLen = cipherText[offset].toInt() and 0xFF
+        val dhPubBytes = cipherText.copyOfRange(offset + 1, offset + 1 + dhPubLen)
+        offset += 1 + dhPubLen
 
-                    // DH agreement and new receiving chain key derivation
-                    val sharedSecret = calculateDH(ratchet.localDhKeyPair.private, ratchet.remoteDhPublicKey, ratchet.isFallback, contactId)
-                    val (rootKeyNew, receivingCK) = kdfRk(ratchet.rootKey, sharedSecret)
-                    ratchet.rootKey = rootKeyNew
-                    ratchet.receivingChainKey = receivingCK
+        // Unpack N, PN, IV
+        val n = unpackInt(cipherText, offset)
+        val pn = unpackInt(cipherText, offset + 4)
+        val iv = cipherText.copyOfRange(offset + 8, offset + 8 + 12)
+        offset += 8 + 12
 
-                    // Generate new local key pair and derive new sending chain key
-                    val kpg = KeyPairGenerator.getInstance("XDH", "BC").apply { initialize(255) }
-                    ratchet.localDhKeyPair = kpg.generateKeyPair()
+        val encryptedBytes = cipherText.copyOfRange(offset, cipherText.size)
 
-                    val sharedSecret2 = calculateDH(ratchet.localDhKeyPair.private, ratchet.remoteDhPublicKey, ratchet.isFallback, contactId)
-                    val (rootKeyNew2, sendingCK) = kdfRk(ratchet.rootKey, sharedSecret2)
-                    ratchet.rootKey = rootKeyNew2
-                    ratchet.sendingChainKey = sendingCK
+        val dhPublicKeyB64 = java.util.Base64.getEncoder().encodeToString(dhPubBytes)
+
+        // If we have an incoming Kyber ciphertext and we are the receiver, decapsulate it to derive the real root key
+        if (kyberCiphertextBytes != null) {
+            val isInitiator = getLocalIdentityFingerprint() < contactId
+            if (!isInitiator) {
+                val recipientPublicKey = contactPublicKeys[contactId]
+                val localKP = localKeyPair
+                val isFallback = recipientPublicKey == null || localKP == null
+                val digest = MessageDigest.getInstance("SHA-256")
+
+                // Classical key agreement (X25519)
+                val x25519SharedSecret = if (!isFallback) {
+                    val ka = KeyAgreement.getInstance("X25519", "BC")
+                    ka.init(localKP!!.private)
+                    ka.doPhase(recipientPublicKey!!, true)
+                    ka.generateSecret()
+                } else {
+                    digest.digest(getFallbackSeedBytes(contactId))
                 }
 
-                // Skip message keys in current receiving chain up to n
+                // Decapsulate using our private Kyber key and derive the real rootKey
+                val (realRootKey, _) = performHybridKeyAgreement(x25519SharedSecret, contactId, kyberCiphertextBytes)
+                
+                // Update Bob's ratchet state with the real hybrid root key
+                ratchet.rootKey = realRootKey
+                Timber.i("Bob decapsulated Kyber ciphertext and initialized hybrid rootKey.")
+            }
+        }
+
+        // 1. Check for skipped keys first
+        val skippedKeyEntity = runBlocking {
+            skippedMessageKeyDao.getSkippedMessageKey(contactId, dhPublicKeyB64, n)
+        }
+        
+        val mk = if (skippedKeyEntity != null) {
+            Timber.i("Decrypting with skipped message key for msg number $n")
+            val key = skippedKeyEntity.messageKey
+            // Delete used skipped key for forward secrecy
+            runBlocking {
+                skippedMessageKeyDao.deleteSkippedMessageKey(contactId, dhPublicKeyB64, n)
+            }
+            key
+        } else {
+            // 2. Perform DH ratchet step if public key has changed
+            val currentRemoteEncoded = ratchet.remoteDhPublicKey.encoded
+            val isNewKey = !dhPubBytes.contentEquals(currentRemoteEncoded)
+
+            if (isNewKey) {
+                Timber.i("New DH key received. Performing DH ratchet update.")
+                // Skip message keys in old receiving chain
                 val remoteEncoded = ratchet.remoteDhPublicKey.encoded
-                while (ratchet.receivingMessageNumber < n) {
+                while (ratchet.receivingMessageNumber < pn) {
                     val skippedMk = ratchet.deriveNextReceivingKey()
                     saveSkippedKey(contactId, remoteEncoded, ratchet.receivingMessageNumber - 1, skippedMk)
                 }
 
-                // Derive the current message key and update receivingMessageNumber to n+1
-                val derivedMk = ratchet.deriveNextReceivingKey()
-                derivedMk
+                // Perform DH Ratchet Step
+                ratchet.previousChainLength = ratchet.sendingMessageNumber
+                ratchet.sendingMessageNumber = 0
+                ratchet.receivingMessageNumber = 0
+
+                val kf = KeyFactory.getInstance("X25519", "BC")
+                val spec = X509EncodedKeySpec(dhPubBytes)
+                ratchet.remoteDhPublicKey = kf.generatePublic(spec)
+
+                // DH agreement and new receiving chain key derivation
+                val sharedSecret = calculateDH(ratchet.localDhKeyPair.private, ratchet.remoteDhPublicKey, ratchet.isFallback, contactId)
+                val (rootKeyNew, receivingCK) = kdfRk(ratchet.rootKey, sharedSecret)
+                ratchet.rootKey = rootKeyNew
+                ratchet.receivingChainKey = receivingCK
+
+                // Generate new local key pair and derive new sending chain key
+                val kpg = KeyPairGenerator.getInstance("XDH", "BC").apply { initialize(255) }
+                ratchet.localDhKeyPair = kpg.generateKeyPair()
+
+                val sharedSecret2 = calculateDH(ratchet.localDhKeyPair.private, ratchet.remoteDhPublicKey, ratchet.isFallback, contactId)
+                val (rootKeyNew2, sendingCK) = kdfRk(ratchet.rootKey, sharedSecret2)
+                ratchet.rootKey = rootKeyNew2
+                ratchet.sendingChainKey = sendingCK
             }
 
-            // Decrypt with AES-GCM
-            val aesKey = SecretKeySpec(mk, "AES")
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            val spec = GCMParameterSpec(128, iv)
-            cipher.init(Cipher.DECRYPT_MODE, aesKey, spec)
-            val plainBytes = cipher.doFinal(encryptedBytes)
-
-            // Bob has replied/active, we can clear the pending Kyber ciphertext
-            ratchet.pendingKyberCiphertext = null
-
-            // Persist updated state to DB
-            saveRatchetStateToDb(contactId, ratchet)
-            Timber.d("CryptoManagerImpl: Decrypted message from $contactId successfully. Output size: ${plainBytes.size} bytes")
-
-            plainBytes
-        } catch (e: Exception) {
-            val currentState = ratchetStates[contactId]
-            val rootKeyHash = currentState?.let {
-                try {
-                    val digest = MessageDigest.getInstance("SHA-256")
-                    java.util.Base64.getEncoder().encodeToString(digest.digest(it.rootKey))
-                } catch (ex: Exception) { "unknown" }
-            } ?: "no_state"
-            val sendingN = currentState?.sendingMessageNumber ?: -1
-            val receivingN = currentState?.receivingMessageNumber ?: -1
-            val skippedCount = runBlocking {
-                try {
-                    skippedMessageKeyDao.getSkippedKeysCount(contactId)
-                } catch (ex: Exception) { -1 }
+            // Skip message keys in current receiving chain up to n
+            val remoteEncoded = ratchet.remoteDhPublicKey.encoded
+            while (ratchet.receivingMessageNumber < n) {
+                val skippedMk = ratchet.deriveNextReceivingKey()
+                saveSkippedKey(contactId, remoteEncoded, ratchet.receivingMessageNumber - 1, skippedMk)
             }
-            Timber.e(e, "CryptoManagerImpl: Decryption failed (BAD_DECRYPT) for contact: $contactId. " +
-                    "Diagnostics: sendingMessageNumber=$sendingN, receivingMessageNumber=$receivingN, " +
-                    "rootKeyHash=$rootKeyHash, skippedKeysCount=$skippedCount")
-            
-            // Rollback in-memory state so that it has to be reloaded next time
-            ratchetStates.remove(contactId)
-            Timber.i("CryptoManagerImpl: Removed corrupted in-memory ratchet state for contact $contactId to force reload on next attempt.")
-            
-            ByteArray(0)
+
+            // Derive the current message key and update receivingMessageNumber to n+1
+            val derivedMk = ratchet.deriveNextReceivingKey()
+            derivedMk
+        }
+
+        // Decrypt with AES-GCM
+        val aesKey = SecretKeySpec(mk, "AES")
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        val spec = GCMParameterSpec(128, iv)
+        cipher.init(Cipher.DECRYPT_MODE, aesKey, spec)
+        val plainBytes = cipher.doFinal(encryptedBytes)
+
+        // Bob has replied/active, we can clear the pending Kyber ciphertext
+        ratchet.pendingKyberCiphertext = null
+
+        // Persist updated state to DB
+        saveRatchetStateToDb(contactId, ratchet)
+        Timber.d("CryptoManagerImpl: Decrypted message from $contactId successfully. Output size: ${plainBytes.size} bytes")
+
+        return plainBytes
+    }
+
+    private fun handleDecryptionFailure(contactId: String, exception: Exception) {
+        val failures = (decryptionFailureCounts[contactId] ?: 0) + 1
+        decryptionFailureCounts[contactId] = failures
+        Timber.w("CryptoManagerImpl: Decryption failure count for $contactId is now $failures")
+
+        val currentState = ratchetStates[contactId]
+        val rootKeyHash = currentState?.let {
+            try {
+                val digest = MessageDigest.getInstance("SHA-256")
+                java.util.Base64.getEncoder().encodeToString(digest.digest(it.rootKey))
+            } catch (ex: Exception) { "unknown" }
+        } ?: "no_state"
+        val sendingN = currentState?.sendingMessageNumber ?: -1
+        val receivingN = currentState?.receivingMessageNumber ?: -1
+        val skippedCount = runBlocking {
+            try {
+                skippedMessageKeyDao.getSkippedKeysCount(contactId)
+            } catch (ex: Exception) { -1 }
+        }
+        
+        Timber.e(exception, "CryptoManagerImpl: Decryption failed (BAD_DECRYPT) for contact: $contactId. " +
+                "Diagnostics: failuresCount=$failures, sendingMessageNumber=$sendingN, receivingMessageNumber=$receivingN, " +
+                "rootKeyHash=$rootKeyHash, skippedKeysCount=$skippedCount")
+
+        // Remove from memory
+        ratchetStates.remove(contactId)
+        Timber.i("CryptoManagerImpl: Removed corrupted/failed in-memory ratchet state for contact $contactId.")
+
+        if (failures >= 3) {
+            Timber.w("CryptoManagerImpl: Failure count reached $failures. Forcing session re-establishment (isNewSession = true)...")
+            decryptionFailureCounts[contactId] = 0 // reset counter
+            establishSecureSession(contactId, isNewSession = true)
         }
     }
 
@@ -706,6 +779,13 @@ class CryptoManagerImpl @Inject constructor(
         }
     }
 
+    override fun isSessionReady(contactFingerprint: String): Boolean {
+        loadRatchetStateFromDb(contactFingerprint)
+        val ready = ratchetStates.containsKey(contactFingerprint)
+        Timber.d("isSessionReady: Checked session status for $contactFingerprint -> ready: $ready")
+        return ready
+    }
+
     override fun performHybridKeyAgreement(
         x25519SharedSecret: ByteArray,
         contactFingerprint: String,
@@ -728,7 +808,8 @@ class CryptoManagerImpl @Inject constructor(
                 val kyberCiphertext = encapResult.encapsulation
                 
                 val rootKey = hkdfDerive(x25519SharedSecret, mlKemSharedSecret)
-                Timber.i("[Hybrid] Alice derived rootKey and generated Kyber ciphertext.")
+                val rootKeyHash = digest.digest(rootKey).take(8).joinToString("") { "%02x".format(it) }
+                Timber.i("[Hybrid] Alice derived rootKey and generated Kyber ciphertext. rootKey hash: $rootKeyHash")
                 return Pair(rootKey, kyberCiphertext)
             } else {
                 // Bob (Receiver): If we have the incoming ciphertext, decapsulate it using our private key
@@ -738,13 +819,15 @@ class CryptoManagerImpl @Inject constructor(
                     val extractor = KyberKEMExtractor(localPriv)
                     val mlKemSharedSecret = extractor.extractSecret(incomingKyberCiphertext)
                     val rootKey = hkdfDerive(x25519SharedSecret, mlKemSharedSecret)
-                    Timber.i("[Hybrid] Bob decapsulated Kyber ciphertext and derived rootKey.")
+                    val rootKeyHash = digest.digest(rootKey).take(8).joinToString("") { "%02x".format(it) }
+                    Timber.i("[Hybrid] Bob decapsulated Kyber ciphertext and derived rootKey. rootKey hash: $rootKeyHash")
                     return Pair(rootKey, null)
                 } else {
                     // Bob doesn't have the ciphertext yet (waiting for Alice's first message).
                     // We temporarily return a rootKey using a placeholder (classical only) until the ciphertext is received.
                     val rootKey = hkdfDerive(x25519SharedSecret, ByteArray(32))
-                    Timber.w("[Hybrid] Bob awaiting Kyber ciphertext. Initializing with classical-only placeholder.")
+                    val rootKeyHash = digest.digest(rootKey).take(8).joinToString("") { "%02x".format(it) }
+                    Timber.w("[Hybrid] Bob awaiting Kyber ciphertext. Initializing with classical-only placeholder. rootKey hash: $rootKeyHash")
                     return Pair(rootKey, null)
                 }
             }
@@ -767,6 +850,8 @@ class CryptoManagerImpl @Inject constructor(
             val mlKemSharedSecret = encapResult.secret
             
             val rootKey = hkdfDerive(x25519SharedSecret, mlKemSharedSecret)
+            val rootKeyHash = digest.digest(rootKey).take(8).joinToString("") { "%02x".format(it) }
+            Timber.i("[Hybrid Fallback] Derived fallback rootKey. rootKey hash: $rootKeyHash")
             return Pair(rootKey, null)
         }
     }

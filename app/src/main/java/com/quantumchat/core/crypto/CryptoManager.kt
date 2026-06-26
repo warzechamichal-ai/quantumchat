@@ -115,5 +115,10 @@ interface CryptoManager {
      */
     fun deleteSession(contactFingerprint: String): Boolean
 
+    /**
+     * Sprawdza, czy sesja ratchetu jest gotowa w pamięci podręcznej lub bazie danych.
+     */
+    fun isSessionReady(contactFingerprint: String): Boolean
+
     // endregion
 }

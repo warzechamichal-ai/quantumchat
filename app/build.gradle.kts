@@ -14,8 +14,8 @@ android {
         applicationId = "com.quantumchat"
         minSdk = 30
         targetSdk = 35
-        versionCode = 21
-        versionName = "3.10"
+        versionCode = 22
+        versionName = "3.11"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
