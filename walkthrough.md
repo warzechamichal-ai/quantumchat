@@ -163,6 +163,17 @@ $env:JAVA_HOME="C:\Program Files\Android\Android Studio\jbr"
   * **Decryption Failure Retry & Limit:** Refined `decryptMessage()` in [CryptoManagerImpl.kt](file:///C:/Users/warze/StudioProjects/quantumchat/app/src/main/java/com/quantumchat/core/crypto/CryptoManagerImpl.kt) so that on failure, it first reloads the unmutated state from the database and retries once before discarding the cached state. Tracked consecutive decryption failures per contact; if failures reach 3, it forces session re-establishment via `establishSecureSession(..., isNewSession = true)`. On successful decryption, the failure counter is reset to `0`.
   * **Send Button UI Lock & Status:** Updated [ChatScreen.kt](file:///C:/Users/warze/StudioProjects/quantumchat/app/src/main/java/com/quantumchat/feature/chat/ChatScreen.kt) to display a "Nawiązywanie bezpiecznego połączenia..." indicator below the message input field when the session is not ready. Added visual graying-out states (disabled container/content colors) to the Send button when disabled. Configured the `ChatViewModel` loop to dynamically query `cryptoManager.isSessionReady` and update `isSessionReady` in the UI state.
 
+### Version Increment to v3.12 - Symmetric Fallback Chain Keys & Stable Hybrid Key Agreement
+* **Change:**
+  * **App Versioning:** Updated [build.gradle.kts](file:///C:/Users/warze/StudioProjects/quantumchat/app/build.gradle.kts) to version code `23` and version name `"3.12"`, and updated [AppVersion.kt](file:///C:/Users/warze/StudioProjects/quantumchat/app/src/main/java/com/quantumchat/core/common/AppVersion.kt).
+  * **Stable Hybrid Key Agreement in Fallback:** Replaced the potentially unstable `SHA1PRNG` `SecureRandom` keypair generator in [CryptoManagerImpl.kt](file:///C:/Users/warze/StudioProjects/quantumchat/app/src/main/java/com/quantumchat/core/crypto/CryptoManagerImpl.kt#L836-L856)'s fallback mode with a direct SHA-256 hashing mechanism. This ensures 100% deterministic, device-independent `rootKey` derivation on all hardware architectures, eliminating mismatches between different device manufacturers (e.g. Samsung vs Doogee).
+  * **Symmetric Initial Chain Keys:** Updated `establishSecureSession` in `CryptoManagerImpl.kt`. When `isFallback` is true:
+    - Alice (Initiator) derives her `sendingChainKey` using counter `0x02` and `receivingChainKey` using counter `0x01`.
+    - Bob (Responder) derives his `sendingChainKey` using counter `0x01` (matching Alice's receiving chain) and `receivingChainKey` using counter `0x02` (matching Alice's sending chain).
+    - Bob explicitly sets `sendingMessageNumber = 0` and `receivingMessageNumber = 0` on initialization.
+    - Bob uses the direct `rootKey` derived from `performHybridKeyAgreement` without additional KDF mutations on start, ensuring perfect parity with Alice.
+  * **Detailed Keys Diagnostics:** Added detailed Timber log outputs showing the computed hashes of `rootKey`, `sendingChainKey`, and `receivingChainKey` on both devices immediately after state creation.
+
 #### Known Limitations / Future Work
 - Direct IP direct connections operate in a developer/fallback mode where cryptographic trust is derived purely from local network fingerprints instead of out-of-band verified QR key exchanges. This fallback mode is not cryptographically protected against Active Man-in-the-Middle (MitM) attacks during the first connection. True out-of-band PQC QR verification remains the recommended security baseline.
 

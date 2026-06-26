@@ -246,13 +246,17 @@ class CryptoManagerImpl @Inject constructor(
                 
                 // Alice performs first DH agreement with Bob's initial DH public key
                 val sharedSecret = calculateDH(aliceDhs.private, initialRemotePub, isFallback, contactFingerprint)
-                val (rootKeyNew, sendingCK) = kdfRk(rootKey, sharedSecret)
                 
-                // Under fallback, Alice also derives receiving CK deterministically
-                val receivingCK = if (isFallback) {
-                    hmacSha256(rootKey, sharedSecret + byteArrayOf(3))
+                val (rootKeyNew, sendingCK, receivingCK) = if (isFallback) {
+                    // Version 3.12: Fallback mode - perform full deterministic initialization of both chains directly
+                    // using the rootKey and shared secret derived from sorted fingerprints.
+                    // Alice (Initiator) sending is Bob's receiving (0x02), and Alice receiving is Bob's sending (0x01).
+                    val sCK = hmacSha256(rootKey, sharedSecret + byteArrayOf(0x02))
+                    val rCK = hmacSha256(rootKey, sharedSecret + byteArrayOf(0x01))
+                    Triple(rootKey, sCK, rCK)
                 } else {
-                    ByteArray(32)
+                    val (rkNew, sCK) = kdfRk(rootKey, sharedSecret)
+                    Triple(rkNew, sCK, ByteArray(32))
                 }
 
                 RatchetState(
@@ -278,15 +282,16 @@ class CryptoManagerImpl @Inject constructor(
                 }
                 
                 if (isFallback) {
-                    // Bob responder fallback mode: perform full deterministic initialization
-                    Timber.d("establishSecureSession: Bob (Responder) fallback mode - performing full initialization")
+                    // Version 3.12: Bob (Responder) fallback mode - perform full deterministic symmetric initialization
+                    // to match Alice's initial chain keys exactly.
+                    // Bob's sending is Alice's receiving (0x01), and Bob's receiving is Alice's sending (0x02).
+                    Timber.d("establishSecureSession: Bob (Responder) fallback mode - performing full symmetric initialization")
                     val sharedSecret = calculateDH(bobDhs.private, initialRemotePub, isFallback, contactFingerprint)
-                    val rootKeyNew = hmacSha256(rootKey, sharedSecret + byteArrayOf(1))
-                    val receivingCK = hmacSha256(rootKey, sharedSecret + byteArrayOf(2))
-                    val sendingCK = hmacSha256(rootKey, sharedSecret + byteArrayOf(3))
+                    val sendingCK = hmacSha256(rootKey, sharedSecret + byteArrayOf(0x01))
+                    val receivingCK = hmacSha256(rootKey, sharedSecret + byteArrayOf(0x02))
                     
                     RatchetState(
-                        rootKey = rootKeyNew,
+                        rootKey = rootKey,
                         sendingChainKey = sendingCK,
                         receivingChainKey = receivingCK,
                         sendingMessageNumber = 0,
@@ -318,8 +323,13 @@ class CryptoManagerImpl @Inject constructor(
 
             // Save new state to DB
             saveRatchetStateToDb(contactFingerprint, state)
+            
+            // Version 3.12: Detailed diagnostics logging of derived keys hashes
             val rootKeyHash = digest.digest(state.rootKey).take(8).joinToString("") { "%02x".format(it) }
-            Timber.i("Ratchet state initialized ($role) and saved to database for fingerprint: $contactFingerprint. rootKey hash: $rootKeyHash")
+            val sendingCKHash = digest.digest(state.sendingChainKey).take(8).joinToString("") { "%02x".format(it) }
+            val receivingCKHash = digest.digest(state.receivingChainKey).take(8).joinToString("") { "%02x".format(it) }
+            Timber.i("Ratchet state initialized ($role) and saved to database for fingerprint: $contactFingerprint. " +
+                     "Diagnostics: rootKey hash=$rootKeyHash, sendingChainKey hash=$sendingCKHash, receivingChainKey hash=$receivingCKHash")
             true
         } catch (e: Exception) {
             Timber.e(e, "Failed to establish secure session.")
@@ -836,18 +846,9 @@ class CryptoManagerImpl @Inject constructor(
             // FALLBACK DETERMINISTIC PQC AGREEMENT (For testing/dev)
             // ========================================================
             Timber.w("[Post-Quantum] No contact Kyber public key. Falling back to deterministic agreement.")
-            val seedDigest = digest.digest(x25519SharedSecret)
-            val deterministicRandom = java.security.SecureRandom.getInstance("SHA1PRNG")
-            deterministicRandom.setSeed(seedDigest)
-
-            val kyberKpg = KyberKeyPairGenerator()
-            kyberKpg.init(KyberKeyGenerationParameters(deterministicRandom, KyberParameters.kyber768))
-            val kyberKeyPair = kyberKpg.generateKeyPair()
-            val kyberPubKey = kyberKeyPair.public as KyberPublicKeyParameters
-
-            val generator = KyberKEMGenerator(deterministicRandom)
-            val encapResult = generator.generateEncapsulated(kyberPubKey)
-            val mlKemSharedSecret = encapResult.secret
+            // To ensure 100% deterministic behavior across different device manufacturers and Android versions,
+            // we bypass the potentially unstable SHA1PRNG SecureRandom and derive the hybrid secret using SHA-256.
+            val mlKemSharedSecret = digest.digest(x25519SharedSecret + "QC-KYBER-FALLBACK".toByteArray(Charsets.UTF_8))
             
             val rootKey = hkdfDerive(x25519SharedSecret, mlKemSharedSecret)
             val rootKeyHash = digest.digest(rootKey).take(8).joinToString("") { "%02x".format(it) }
