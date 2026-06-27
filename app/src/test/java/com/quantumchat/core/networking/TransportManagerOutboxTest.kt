@@ -91,16 +91,16 @@ class TransportManagerOutboxTest {
         )
         every { pendingMessageDao.getPendingMessagesForContact(targetFingerprint) } returns flowOf(listOf(pendingMsg))
 
-        // Mock Tor transport connection to succeed
-        coEvery { torTransport.connect("alice.onion:9095") } returns true
-        coEvery { torTransport.isConnected } returns true
-        coEvery { torTransport.send(any()) } returns true
+        // Mock LAN transport connection to succeed
+        coEvery { localNetworkTransport.connect(any()) } returns true
+        coEvery { localNetworkTransport.isConnected } returns true
+        coEvery { localNetworkTransport.send(any()) } returns true
 
         // Call connect, which should trigger queue dispatching
         manager.connect(targetFingerprint)
 
         // Verify it was dispatched and deleted from outbox
-        coVerify { torTransport.send(match { it.contentEquals(pendingMsg.encryptedPayload) }) }
+        coVerify { localNetworkTransport.send(match { it.contentEquals(pendingMsg.encryptedPayload) }) }
         coVerify { pendingMessageDao.deleteById(42) }
     }
 
@@ -116,15 +116,15 @@ class TransportManagerOutboxTest {
         )
         every { pendingMessageDao.getPendingMessagesForContact(targetFingerprint) } returns flowOf(listOf(deadMsg))
 
-        // Mock Tor transport connection to succeed
-        coEvery { torTransport.connect("alice.onion:9095") } returns true
-        coEvery { torTransport.isConnected } returns true
+        // Mock LAN transport connection to succeed
+        coEvery { localNetworkTransport.connect(any()) } returns true
+        coEvery { localNetworkTransport.isConnected } returns true
 
         // Connect, triggering dispatch
         manager.connect(targetFingerprint)
 
         // Verify it was deleted without attempting to send
-        coVerify(exactly = 0) { torTransport.send(any()) }
+        coVerify(exactly = 0) { localNetworkTransport.send(any()) }
         coVerify { pendingMessageDao.deleteById(99) }
     }
 
@@ -140,10 +140,10 @@ class TransportManagerOutboxTest {
         )
         every { pendingMessageDao.getPendingMessagesForContact(targetFingerprint) } returns flowOf(listOf(pendingMsg))
 
-        // Mock Tor transport connection to succeed but sending fails
-        coEvery { torTransport.connect("alice.onion:9095") } returns true
-        coEvery { torTransport.isConnected } returns true
-        coEvery { torTransport.send(any()) } returns false
+        // Mock LAN transport connection to succeed but sending fails
+        coEvery { localNetworkTransport.connect(any()) } returns true
+        coEvery { localNetworkTransport.isConnected } returns true
+        coEvery { localNetworkTransport.send(any()) } returns false
 
         // Connect, triggering dispatch
         manager.connect(targetFingerprint)

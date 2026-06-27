@@ -183,6 +183,12 @@ $env:JAVA_HOME="C:\Program Files\Android\Android Studio\jbr"
   * **Message Age Verification:** Added verification checks in `decryptMessageWithState` to throw an exception if `n < ratchet.receivingMessageNumber` and there is no skipped key entity, protecting against replay or out-of-order/duplicate attacks.
   * **Early Reset Rescue:** Modified `decryptMessage` so that if a decryption failure occurs during the very first message exchange (`receivingMessageNumber` is `0` or `1`), the system immediately resets the Double Ratchet session (`isNewSession = true`) instead of just attempting to reload from the database.
 
+### Version 4.0 - Stage 1 "Działające wiadomości"
+* **Change:**
+  * **Cryptography Layer simplification:** Created `SessionCrypto` and `SimpleSessionCrypto` using standard AES-GCM-256 with random 12-byte IV prepended to the ciphertext. Added detailed logging and a clean `CryptoException` hierarchy.
+  * **Network Handshake simplification:** Streamlined direct TCP connections in `LocalNetworkTransport` to exchange only identity fingerprints (`QC-PQ-...`) encoded as `[4 bytes Int length][N bytes UTF-8 string]`. Handshake is now completed on both ends without any Double Ratchet initialization or role negotiating steps. Added a robust 15-second socket timeout and up to 3 read retry attempts.
+  * **LAN Exclusive Routing:** Configured `TransportManager` to register only the direct `LocalNetworkTransport`, disabling WebSocket and Tor backends. Forced all packets and connections to be routed exclusively via local WiFi TCP sockets.
+
 #### Known Limitations / Future Work
 - Direct IP direct connections operate in a developer/fallback mode where cryptographic trust is derived purely from local network fingerprints instead of out-of-band verified QR key exchanges. This fallback mode is not cryptographically protected against Active Man-in-the-Middle (MitM) attacks during the first connection. True out-of-band PQC QR verification remains the recommended security baseline.
 

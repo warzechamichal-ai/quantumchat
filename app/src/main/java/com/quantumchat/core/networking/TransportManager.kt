@@ -75,10 +75,11 @@ class TransportManager @Inject constructor(
     init {
         // Register default transports
         registerTransport(localNetworkTransport)
-        registerTransport(wiFiDirectTransport)
-        registerTransport(webSocketTransport)
-        registerTransport(torTransport)
-        Timber.d("TransportManager initialized. Registered: ${transports.size} transports")
+        // Disable for Stage 1:
+        // registerTransport(wiFiDirectTransport)
+        // registerTransport(webSocketTransport)
+        // registerTransport(torTransport)
+        Timber.d("TransportManager initialized. Registered only LocalNetworkTransport for Stage 1. Registered: ${transports.size} transports")
 
         // Start background incoming message processing
         scope.launch {
@@ -342,29 +343,8 @@ class TransportManager @Inject constructor(
      * Identity fingerprints prioritize WebSocketTransport.
      */
     private fun getPrioritizedTransports(target: String): List<Transport> {
-        val isMacFormat = target.matches(Regex("""^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$"""))
-        
-        val isIpFormat = target.matches(Regex("""^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+)?$""")) 
-                || target.contains("localhost") 
-                || target.contains("127.0.0.1")
-
-        val isOnion = target.contains(".onion")
-        
-        val list = when {
-            isOnion -> listOf(torTransport, localNetworkTransport, wiFiDirectTransport, webSocketTransport)
-            isMacFormat -> listOf(wiFiDirectTransport, localNetworkTransport, webSocketTransport)
-            isIpFormat -> {
-                Timber.i("TransportManager: Selected LocalNetworkTransport because target looks like IP address: $target")
-                listOf(localNetworkTransport, wiFiDirectTransport, webSocketTransport)
-            }
-            else -> listOf(webSocketTransport, torTransport, localNetworkTransport, wiFiDirectTransport)
-        }
-
-        return if (isWifiDirectEnabled) {
-            list
-        } else {
-            list.filter { it != wiFiDirectTransport }
-        }
+        Timber.i("TransportManager: Target prioritization overridden for Stage 1. target=$target, using only LocalNetworkTransport")
+        return listOf(localNetworkTransport)
     }
 
     private fun buildPacket(type: Byte, senderFingerprint: String, payload: ByteArray): ByteArray {
@@ -445,15 +425,14 @@ class TransportManager @Inject constructor(
     }
 
     private suspend fun sendPacketToFingerprint(fingerprint: String, packet: ByteArray): Boolean {
-        if (torTransport.hasActiveConnection(fingerprint)) {
-            return torTransport.sendToPeer(fingerprint, packet)
-        }
         if (activeContactFingerprint == fingerprint) {
             val transport = activeTransport
             if (transport != null && transport.isConnected) {
+                Timber.d("TransportManager: sendPacketToFingerprint sending via active transport to $fingerprint")
                 return transport.send(packet)
             }
         }
-        return torTransport.sendToPeer(fingerprint, packet)
+        Timber.w("TransportManager: sendPacketToFingerprint failed, no active transport or mismatch for $fingerprint")
+        return false
     }
 }

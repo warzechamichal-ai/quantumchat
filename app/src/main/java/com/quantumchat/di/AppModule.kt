@@ -22,6 +22,12 @@ abstract class AppModule {
 
     @Binds
     @Singleton
+    abstract fun bindSessionCrypto(
+        simpleSessionCrypto: com.quantumchat.core.crypto.SimpleSessionCrypto
+    ): com.quantumchat.core.crypto.SessionCrypto
+
+    @Binds
+    @Singleton
     abstract fun bindTransport(
         transportManager: TransportManager
     ): Transport
