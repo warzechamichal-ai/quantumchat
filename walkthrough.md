@@ -189,6 +189,13 @@ $env:JAVA_HOME="C:\Program Files\Android\Android Studio\jbr"
   * **Network Handshake simplification:** Streamlined direct TCP connections in `LocalNetworkTransport` to exchange only identity fingerprints (`QC-PQ-...`) encoded as `[4 bytes Int length][N bytes UTF-8 string]`. Handshake is now completed on both ends without any Double Ratchet initialization or role negotiating steps. Added a robust 15-second socket timeout and up to 3 read retry attempts.
   * **LAN Exclusive Routing:** Configured `TransportManager` to register only the direct `LocalNetworkTransport`, disabling WebSocket and Tor backends. Forced all packets and connections to be routed exclusively via local WiFi TCP sockets.
 
+### Version 4.0.1 - Stage 1 Integration
+* **Change:**
+  * **ViewModel Integration**: Injected `SessionCrypto` into `ChatViewModel` in [ChatScreen.kt](file:///C:/Users/warze/StudioProjects/quantumchat/app/src/main/java/com/quantumchat/feature/chat/ChatScreen.kt). Implemented message encryption on send (`sessionCrypto.encryptMessage`) and message decryption on receive (`sessionCrypto.decryptMessage`).
+  * **Dynamic Session Key Synchronization**: Added a "Generate Key 🔑" action button to the chat TopAppBar actions. Clicking this invokes `generateAndSetNewSessionKey()`, which generates a random 256-bit AES session key, sets it locally, and transmits it to the peer using a packet of type `0x03`. The peer VM collects incoming packets via `observeIncoming()`, extracts the key, and configures its local session key, enabling dynamic secure setup over LAN TCP.
+  * **Ack Flow Restoration**: Added `sendAck` to [TransportManager.kt](file:///C:/Users/warze/StudioProjects/quantumchat/app/src/main/java/com/quantumchat/core/networking/TransportManager.kt) to send type `0x02` acknowledgement packets, allowing delivered confirmations (`✓✓`) in the UI when messages are decrypted.
+  * **App Versioning**: Bumped `versionCode` to `25` and `versionName` to `"4.0.1"` in [build.gradle.kts](file:///C:/Users/warze/StudioProjects/quantumchat/app/build.gradle.kts) and updated [AppVersion.kt](file:///C:/Users/warze/StudioProjects/quantumchat/app/src/main/java/com/quantumchat/core/common/AppVersion.kt).
+
 #### Known Limitations / Future Work
 - Direct IP direct connections operate in a developer/fallback mode where cryptographic trust is derived purely from local network fingerprints instead of out-of-band verified QR key exchanges. This fallback mode is not cryptographically protected against Active Man-in-the-Middle (MitM) attacks during the first connection. True out-of-band PQC QR verification remains the recommended security baseline.
 

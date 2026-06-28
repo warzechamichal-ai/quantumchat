@@ -67,12 +67,35 @@ class ChatViewModel @Inject constructor(
     private val transportManager: TransportManager,
     private val messageDao: MessageDao,
     private val contactRepository: ContactRepository,
+    private val sessionCrypto: com.quantumchat.core.crypto.SessionCrypto,
     savedStateHandle: SavedStateHandle
 ) : ViewModel() {
 
     private val chatArgs = savedStateHandle.toRoute<ChatScreenDestination>()
     private val _state = MutableStateFlow(ChatUiState())
     val state: StateFlow<ChatUiState> = _state.asStateFlow()
+
+    private var sessionKey: ByteArray? = null
+
+    fun setSessionKey(key: ByteArray) {
+        this.sessionKey = key
+        _state.value = _state.value.copy(isSessionReady = true)
+        timber.log.Timber.i("ChatViewModel: Session key set. isSessionReady updated to true.")
+    }
+
+    fun generateAndSetNewSessionKey() {
+        viewModelScope.launch {
+            val key = sessionCrypto.generateSessionKey()
+            setSessionKey(key)
+            timber.log.Timber.i("ChatViewModel: New session key generated for current chat.")
+            val success = transportManager.sendSessionKey(key)
+            if (success) {
+                timber.log.Timber.i("ChatViewModel: Successfully shared session key with peer.")
+            } else {
+                timber.log.Timber.w("ChatViewModel: Failed to share session key with peer.")
+            }
+        }
+    }
 
     init {
         timber.log.Timber.d("ChatViewModel INIT - contactId: ${chatArgs.contactId}, contactName: ${chatArgs.contactName}")
@@ -131,14 +154,68 @@ class ChatViewModel @Inject constructor(
                 }
 
                 // Dynamically update isSessionReady based on the cryptographic state
+                // Disabled for Stage 1:
+                /*
                 if (fingerprint != null) {
                     val sessionReady = cryptoManager.isSessionReady(fingerprint)
                     if (_state.value.isSessionReady != sessionReady) {
                         _state.value = _state.value.copy(isSessionReady = sessionReady)
                     }
                 }
+                */
 
                 delay(5000) // Poll and check connection/discovery state every 5 seconds
+            }
+        }
+
+        // Observe incoming packets and handle decryption & key exchange
+        viewModelScope.launch {
+            transportManager.observeIncoming().collect { packet ->
+                try {
+                    if (packet.size < 2) return@collect
+                    val type = packet[0].toInt()
+                    val fingerprintLen = packet[1].toInt() and 0xFF
+                    if (packet.size < 2 + fingerprintLen) return@collect
+                    val senderFingerprint = String(packet, 2, fingerprintLen, Charsets.UTF_8)
+                    val payload = packet.copyOfRange(2 + fingerprintLen, packet.size)
+
+                    val contact = _state.value.contact
+                    if (contact != null && senderFingerprint == contact.publicKeyFingerprint) {
+                        when (type) {
+                            0x01 -> {
+                                timber.log.Timber.i("ChatViewModel: Received encrypted message packet from $senderFingerprint, size: ${payload.size} bytes")
+                                val key = sessionKey
+                                if (key != null) {
+                                    try {
+                                        val decryptedBytes = sessionCrypto.decryptMessage(payload, key)
+                                        val jsonStr = decryptedBytes.toString(Charsets.UTF_8)
+                                        val receivedMessage = Json.decodeFromString<Message>(jsonStr)
+                                        val finalMessage = receivedMessage.copy(
+                                            senderId = senderFingerprint,
+                                            recipientId = "me",
+                                            status = com.quantumchat.core.common.model.MessageStatus.DELIVERED
+                                        )
+                                        messageDao.insertMessage(finalMessage.toEntity())
+                                        timber.log.Timber.i("ChatViewModel: Decrypted and saved message: ${finalMessage.content}")
+                                        
+                                        // Send Ack
+                                        transportManager.sendAck(senderFingerprint, finalMessage.id)
+                                    } catch (e: Exception) {
+                                        timber.log.Timber.e(e, "ChatViewModel: Failed to decrypt message")
+                                    }
+                                } else {
+                                    timber.log.Timber.w("ChatViewModel: Received message but sessionKey is null. Cannot decrypt.")
+                                }
+                            }
+                            0x03 -> {
+                                timber.log.Timber.i("ChatViewModel: Received session key packet from $senderFingerprint, size: ${payload.size} bytes")
+                                setSessionKey(payload)
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    timber.log.Timber.e(e, "ChatViewModel: Error processing incoming packet")
+                }
             }
         }
     }
@@ -159,25 +236,9 @@ class ChatViewModel @Inject constructor(
                         val targetAddress = contact.onionAddress ?: fingerprint
                         val isIp = contact.onionAddress != null && contact.onionAddress.matches(Regex("""^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+)?$"""))
 
-                        var sessionReady = false
-                        if (!isIp) {
-                            timber.log.Timber.i("ChatViewModel: Attempting to establish secure PQ hybrid session for contact '${contact.name}' (fingerprint: $fingerprint)")
-                            try {
-                                val success = cryptoManager.establishSecureSession(fingerprint)
-                                if (success) {
-                                    timber.log.Timber.i("ChatViewModel: Secure PQ session established successfully for fingerprint: $fingerprint")
-                                    sessionReady = true
-                                } else {
-                                    timber.log.Timber.e("ChatViewModel: establishSecureSession returned false for non-IP fingerprint: $fingerprint")
-                                }
-                            } catch (e: Exception) {
-                                timber.log.Timber.e(e, "ChatViewModel: Failed to establish secure PQ session for fingerprint: $fingerprint")
-                            }
-                        }
-
                         _state.value = _state.value.copy(
                             contact = contact,
-                            isSessionReady = sessionReady
+                            isSessionReady = (sessionKey != null)
                         )
 
                         // Observe messages from database reactively
@@ -223,26 +284,6 @@ class ChatViewModel @Inject constructor(
                         val connected = transportManager.connect(targetAddress)
                         timber.log.Timber.i("ChatViewModel: TransportManager connection result for '$targetAddress': connected=$connected")
                         
-                        if (isIp && connected) {
-                            timber.log.Timber.i("ChatViewModel: TCP Connection successful. Now establishing secure PQ session for fingerprint: $fingerprint")
-                            try {
-                                val success = cryptoManager.establishSecureSession(fingerprint, isNewSession = true)
-                                if (success) {
-                                    timber.log.Timber.i("ChatViewModel: Secure PQ session established successfully for fingerprint: $fingerprint")
-                                    _state.value = _state.value.copy(isSessionReady = true)
-                                } else {
-                                    timber.log.Timber.e("ChatViewModel: establishSecureSession returned false for IP fingerprint: $fingerprint")
-                                    _state.value = _state.value.copy(isSessionReady = false)
-                                }
-                            } catch (e: Exception) {
-                                timber.log.Timber.e(e, "ChatViewModel: Failed to establish secure PQ session for fingerprint: $fingerprint")
-                                _state.value = _state.value.copy(isSessionReady = false)
-                            }
-                        } else if (isIp) {
-                            timber.log.Timber.w("ChatViewModel: TCP Connection failed for IP contact. Session is not ready.")
-                            _state.value = _state.value.copy(isSessionReady = false)
-                        }
-
                         val isOnline = connected || transportManager.onlinePeers.first().contains(fingerprint)
                         _state.value = _state.value.copy(connectionActive = isOnline)
                     } else {
@@ -250,8 +291,8 @@ class ChatViewModel @Inject constructor(
                     }
                 }
                 is ChatUiIntent.SendTextMessage -> {
-                    if (!_state.value.isSessionReady) {
-                        timber.log.Timber.w("ChatViewModel: Cannot send message, cryptographic session is not ready.")
+                    if (sessionKey == null) {
+                        timber.log.Timber.w("ChatViewModel: Cannot send message, session key is not set.")
                         return@launch
                     }
                     val text = intent.content.trim()
@@ -280,21 +321,25 @@ class ChatViewModel @Inject constructor(
                         status = com.quantumchat.core.common.model.MessageStatus.SENT
                     )
 
-                    // 2. Save message to local database immediately (UI will auto-update via observation)
-                    timber.log.Timber.d("ChatViewModel: Saving outgoing message to database: ${displayMessage.id}")
-                    messageDao.insertMessage(displayMessage.toEntity())
-
-                    // 3. Serialize and encrypt message content
+                    // 2. Serialize and encrypt message content using simple session crypto
                     val jsonStr = Json.encodeToString(displayMessage)
                     val plainBytes = jsonStr.toByteArray(Charsets.UTF_8)
-                    val cipherBytes = cryptoManager.encryptMessage(plainBytes, targetContact.publicKeyFingerprint)
+                    try {
+                        val cipherBytes = sessionCrypto.encryptMessage(plainBytes, sessionKey!!)
 
-                    _state.value = _state.value.copy(inputText = "")
+                        // 3. Save message to local database immediately
+                        timber.log.Timber.d("ChatViewModel: Saving outgoing message to database: ${displayMessage.id}")
+                        messageDao.insertMessage(displayMessage.toEntity())
 
-                    // 4. Send encrypted payload over network transport
-                    val success = transportManager.send(cipherBytes)
-                    if (!success) {
-                        timber.log.Timber.w("Failed to send message over transport")
+                        _state.value = _state.value.copy(inputText = "")
+
+                        // 4. Send encrypted payload over network transport
+                        val success = transportManager.send(cipherBytes)
+                        if (!success) {
+                            timber.log.Timber.w("Failed to send message over transport")
+                        }
+                    } catch (e: Exception) {
+                        timber.log.Timber.e(e, "ChatViewModel: Encryption failed")
                     }
                     val isOnline = transportManager.isConnected || transportManager.onlinePeers.first().contains(targetContact.publicKeyFingerprint)
                     _state.value = _state.value.copy(connectionActive = isOnline)
@@ -386,6 +431,17 @@ fun ChatScreen(
                     }
                 },
                 actions = {
+                    Button(
+                        onClick = { viewModel.generateAndSetNewSessionKey() },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.primaryContainer,
+                            contentColor = MaterialTheme.colorScheme.onPrimaryContainer
+                        ),
+                        modifier = Modifier.padding(end = 8.dp)
+                    ) {
+                        Text("Generate Key 🔑", style = MaterialTheme.typography.labelSmall)
+                    }
+
                     if (!state.connectionActive) {
                         TextButton(
                             onClick = { viewModel.handleIntent(ChatUiIntent.ForceDiscovery) },

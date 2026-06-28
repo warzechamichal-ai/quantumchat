@@ -376,13 +376,15 @@ class TransportManager @Inject constructor(
 
             when (type) {
                 0x01 -> {
-                    Timber.i("TransportManager: Received message packet from $senderFingerprint")
-                    handleIncomingMessage(senderFingerprint, payload)
+                    Timber.d("TransportManager: Received message packet from $senderFingerprint (type 0x01). Delegated to ChatViewModel.")
                 }
                 0x02 -> {
                     val messageId = String(payload, Charsets.UTF_8)
                     Timber.i("TransportManager: Received Ack for message $messageId from $senderFingerprint")
                     messageDao.get().updateMessageStatus(messageId, com.quantumchat.core.common.model.MessageStatus.DELIVERED.name)
+                }
+                0x03 -> {
+                    Timber.d("TransportManager: Received session key packet from $senderFingerprint (type 0x03). Delegated to ChatViewModel.")
                 }
                 else -> {
                     Timber.w("TransportManager: Unknown packet type: $type")
@@ -391,6 +393,34 @@ class TransportManager @Inject constructor(
         } catch (e: Exception) {
             Timber.e(e, "TransportManager: Failed to process incoming packet: ${e.message}")
         }
+    }
+
+    suspend fun sendSessionKey(key: ByteArray): Boolean {
+        val fingerprint = activeContactFingerprint
+        if (fingerprint == null) {
+            Timber.w("TransportManager: Cannot send session key, activeContactFingerprint is null")
+            return false
+        }
+        val packet = buildPacket(0x03, cryptoManager.getLocalIdentityFingerprint(), key)
+        val transport = activeTransport
+        if (transport != null && transport.isConnected) {
+            Timber.i("TransportManager: Sending session key packet of size ${packet.size} bytes to $fingerprint")
+            return transport.send(packet)
+        }
+        Timber.w("TransportManager: Failed to send session key, transport is null or disconnected")
+        return false
+    }
+
+    suspend fun sendAck(recipientFingerprint: String, messageId: String): Boolean {
+        val ackPayload = messageId.toByteArray(Charsets.UTF_8)
+        val packet = buildPacket(0x02, cryptoManager.getLocalIdentityFingerprint(), ackPayload)
+        val transport = activeTransport
+        if (transport != null && transport.isConnected) {
+            Timber.i("TransportManager: Sending Ack for message $messageId to $recipientFingerprint")
+            return transport.send(packet)
+        }
+        Timber.w("TransportManager: Failed to send Ack, transport is null or disconnected")
+        return false
     }
 
     private suspend fun handleIncomingMessage(senderFingerprint: String, encryptedPayload: ByteArray) {

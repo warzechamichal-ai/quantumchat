@@ -10,6 +10,7 @@ object AppVersion {
     val versionCode: Int = BuildConfig.VERSION_CODE
 
     val changelog: List<String> = listOf(
+        "v4.0.1: Etap 1 – Podłączono SimpleSessionCrypto do ChatViewModel. Wprowadzono podstawowe szyfrowanie AES-GCM wiadomości tekstowych.",
         "v3.13: Zsynchronizowano przypisywanie ról (Initiator/Responder) na podstawie leksykograficznego porównania fingerprintów w LocalNetworkTransport z Timber.i, zapewniono deterministyczne zerowanie liczników przy Responder fallback, wprowadzono weryfikację wieku wiadomości w decryptMessageWithState, oraz dodano natychmiastowy reset sesji przy błędzie deszyfracji na pierwszej/drugiej wiadomości (N=0 lub 1).",
         "v3.12: Zaimplementowano w pełni symetryczną i 100% deterministyczną inicjalizację kluczy łańcuchów (sending/receiving) dla Alice i Boba w trybie fallback w CryptoManagerImpl, wyeliminowano niestabilny SHA1PRNG na rzecz bezpośredniego hashowania SHA-256 w performHybridKeyAgreement, oraz dodano szczegółowe logowanie hashy kluczy diagnostycznych.",
         "v3.11: Poprawiono stabilność handshake'u TCP w LocalNetworkTransport (read timeout 5s, 2 próby odczytu, logowanie Timber.w), zaimplementowano pełną deterministyczną inicjalizację Boba w trybie fallback w CryptoManagerImpl, wymuszono blokowanie przycisku wysyłania i dodano indykator stanu połączenia w ChatScreen, oraz ulepszono obsługę błędów deszyfracji z ponownym ładowaniem stanu z bazy danych i limitem 3 nieudanych prób przed resetem sesji.",
